@@ -181,6 +181,25 @@ impl Database {
         Ok(())
     }
 
+    pub fn mark_capture_for_pit(
+        &self,
+        pit_id: &str,
+        status: CaptureStatus,
+        error: Option<&str>,
+    ) -> Result<()> {
+        self.conn.execute(
+            r#"
+            UPDATE capture_events
+            SET status = ?2, error = ?3
+            WHERE id = (
+                SELECT capture_id FROM pits WHERE id = ?1
+            )
+            "#,
+            params![pit_id, status_to_str(&status), error],
+        )?;
+        Ok(())
+    }
+
     pub fn capture_status(&self, id: &str) -> Result<Option<String>> {
         self.conn
             .query_row(

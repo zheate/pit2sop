@@ -113,7 +113,7 @@ Core rules:
 - Obsidian Markdown is the source of truth.
 - SQLite stores only status and search cache.
 - AI returns structured JSON; Rust code decides what gets written.
-- `sop_action.type = none` still leaves the Pit as `needs_review`; V0.1 treats every Pit as needing either an SOP decision or an explicit human review.
+- `sop_action.type = none` writes the Pit as `processed`; explicit pending patches still require apply/reject to close review.
 - Existing SOPs are only auto-updated inside the marker block:
 
 ```markdown

@@ -178,7 +178,7 @@ impl Pit2Sop {
             "update_existing" | "create_new"
         );
         let can_auto_write_sop = should_write_sop && ai.confidence >= 0.65;
-        let mut status = if can_auto_write_sop {
+        let mut status = if can_auto_write_sop || ai.sop_action.action_type == "none" {
             "processed".to_string()
         } else {
             "needs_review".to_string()
@@ -387,13 +387,23 @@ impl Pit2Sop {
 
     pub fn apply_pending_patch(&self, path: &Path) -> Result<PatchActionSummary> {
         let summary = apply_pending_sop_patch(&self.config.vault_path, path)?;
+        if let Some(source_pit) = summary.source_pit.as_deref() {
+            self.open_db()?
+                .mark_capture_for_pit(source_pit, CaptureStatus::Processed, None)?;
+        }
         self.sync_sops_cache()?;
         self.reindex()?;
         Ok(summary)
     }
 
     pub fn reject_pending_patch(&self, path: &Path) -> Result<PatchActionSummary> {
-        reject_pending_sop_patch(&self.config.vault_path, path)
+        let summary = reject_pending_sop_patch(&self.config.vault_path, path)?;
+        if let Some(source_pit) = summary.source_pit.as_deref() {
+            self.open_db()?
+                .mark_capture_for_pit(source_pit, CaptureStatus::Processed, None)?;
+        }
+        self.reindex()?;
+        Ok(summary)
     }
 
     pub fn sync_sops_cache(&self) -> Result<()> {
@@ -610,7 +620,7 @@ mod tests {
     }
 
     #[test]
-    fn sop_action_none_writes_pit_but_no_sop() {
+    fn sop_action_none_writes_processed_pit_but_no_sop() {
         let temp = tempdir().unwrap();
         let config = test_config(&temp);
         init_vault_dirs(&config.vault_path).unwrap();
@@ -620,8 +630,9 @@ mod tests {
             .process_pit("今天上线出现问题，但这次不需要 SOP")
             .unwrap();
 
-        assert_eq!(summary.status, CaptureStatus::NeedsReview);
-        assert!(summary.pit_path.unwrap().exists());
+        assert_eq!(summary.status, CaptureStatus::Processed);
+        let pit_content = fs::read_to_string(summary.pit_path.unwrap()).unwrap();
+        assert!(pit_content.contains("status: processed"));
         assert!(summary.sop_path.is_none());
         assert!(summary.pending_patch_path.is_none());
     }
@@ -733,6 +744,62 @@ mod tests {
             .query_row("SELECT COUNT(*) FROM sops", [], |row| row.get(0))
             .unwrap();
         assert_eq!(sop_count, 1);
+    }
+
+    #[test]
+    fn apply_pending_patch_marks_source_pit_and_capture_processed() {
+        let temp = tempdir().unwrap();
+        let config = test_config(&temp);
+        init_vault_dirs(&config.vault_path).unwrap();
+        let app = Pit2Sop::with_config(config, Secrets::default());
+
+        let summary = app
+            .process_pit("今天上线漏了 CI secret，需要人工确认 SOP")
+            .unwrap();
+        assert_eq!(summary.status, CaptureStatus::NeedsReview);
+        let pit_path = summary.pit_path.unwrap();
+        let pending_path = summary.pending_patch_path.unwrap();
+
+        app.apply_pending_patch(&pending_path).unwrap();
+
+        let pit_content = fs::read_to_string(pit_path).unwrap();
+        assert!(pit_content.contains("status: processed"));
+        assert!(pit_content.contains("- 状态：processed"));
+        let conn = Connection::open(app.config.db_path()).unwrap();
+        let status: String = conn
+            .query_row("SELECT status FROM capture_events LIMIT 1", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(status, "processed");
+    }
+
+    #[test]
+    fn reject_pending_patch_marks_source_pit_and_capture_processed() {
+        let temp = tempdir().unwrap();
+        let config = test_config(&temp);
+        init_vault_dirs(&config.vault_path).unwrap();
+        let app = Pit2Sop::with_config(config, Secrets::default());
+
+        let summary = app
+            .process_pit("今天上线漏了 CI secret，需要人工确认 SOP")
+            .unwrap();
+        assert_eq!(summary.status, CaptureStatus::NeedsReview);
+        let pit_path = summary.pit_path.unwrap();
+        let pending_path = summary.pending_patch_path.unwrap();
+
+        app.reject_pending_patch(&pending_path).unwrap();
+
+        let pit_content = fs::read_to_string(pit_path).unwrap();
+        assert!(pit_content.contains("status: processed"));
+        assert!(pit_content.contains("- 状态：processed"));
+        let conn = Connection::open(app.config.db_path()).unwrap();
+        let status: String = conn
+            .query_row("SELECT status FROM capture_events LIMIT 1", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(status, "processed");
     }
 
     #[test]

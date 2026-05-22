@@ -167,6 +167,7 @@ pub struct PendingPatchSummary {
 pub struct PatchActionSummary {
     pub path: PathBuf,
     pub target_path: Option<PathBuf>,
+    pub source_pit: Option<String>,
     pub status: String,
     pub message: String,
 }
