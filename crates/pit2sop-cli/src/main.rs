@@ -15,13 +15,26 @@ struct Cli {
 
 #[derive(Debug, Subcommand)]
 enum Commands {
-    Init { vault_path: Option<PathBuf> },
-    Pit { text: String },
-    Doing { text: String },
-    Search { query: String },
+    Init {
+        vault_path: Option<PathBuf>,
+    },
+    Pit {
+        #[arg(required = true, num_args = 1..)]
+        text: Vec<String>,
+    },
+    #[command(alias = "check")]
+    Doing {
+        #[arg(required = true, num_args = 1..)]
+        text: Vec<String>,
+    },
+    Search {
+        #[arg(required = true, num_args = 1..)]
+        query: Vec<String>,
+    },
     Open,
     Reindex,
     Config,
+    Status,
 }
 
 fn main() -> Result<()> {
@@ -37,6 +50,7 @@ fn main() -> Result<()> {
         Some(Commands::Pit { text }) => {
             let app = Pit2Sop::load()?;
             let out = Output::new(&app.config);
+            let text = join_args(text);
             match app.process_pit(&text) {
                 Ok(summary) => out.pit_done(&summary),
                 Err(error) => {
@@ -48,12 +62,14 @@ fn main() -> Result<()> {
         Some(Commands::Doing { text }) => {
             let app = Pit2Sop::load()?;
             let out = Output::new(&app.config);
+            let text = join_args(text);
             let matches = app.doing(&text)?;
             out.doing(&matches);
         }
         Some(Commands::Search { query }) => {
             let app = Pit2Sop::load()?;
             let out = Output::new(&app.config);
+            let query = join_args(query);
             let results = app.search(&query)?;
             out.search(&results);
         }
@@ -71,9 +87,18 @@ fn main() -> Result<()> {
             let config = AppConfig::load_or_default()?;
             println!("{}", toml_like_config(&config));
         }
+        Some(Commands::Status) => {
+            let app = Pit2Sop::load()?;
+            let out = Output::new(&app.config);
+            out.status(&app.status()?);
+        }
     }
 
     Ok(())
+}
+
+fn join_args(args: Vec<String>) -> String {
+    args.join(" ")
 }
 
 fn run_interactive() -> Result<()> {
@@ -300,6 +325,42 @@ impl Output {
             println!("Indexed {} Markdown documents.", count);
         } else {
             println!("已索引 {} 个 Markdown 文档。", count);
+        }
+    }
+
+    fn status(&self, status: &pit2sop_core::models::AppStatus) {
+        if self.english {
+            println!("Vault: {}", status.vault_path.display());
+            println!("DB: {}", status.db_path.display());
+            println!("AI provider: {}", status.ai_provider);
+            println!("Model: {}", status.ai_model);
+            println!(
+                "Secrets: {}",
+                if status.secrets_configured {
+                    "configured"
+                } else {
+                    "missing"
+                }
+            );
+            println!("Indexed docs: {}", status.indexed_docs);
+            println!("Pits: {}", status.pit_files);
+            println!("SOPs: {}", status.sop_files);
+        } else {
+            println!("Vault：{}", status.vault_path.display());
+            println!("DB：{}", status.db_path.display());
+            println!("AI provider：{}", status.ai_provider);
+            println!("Model：{}", status.ai_model);
+            println!(
+                "Secrets：{}",
+                if status.secrets_configured {
+                    "已配置"
+                } else {
+                    "缺失"
+                }
+            );
+            println!("已索引文档：{}", status.indexed_docs);
+            println!("Pits：{}", status.pit_files);
+            println!("SOPs：{}", status.sop_files);
         }
     }
 

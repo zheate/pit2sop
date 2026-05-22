@@ -127,6 +127,18 @@ pub struct ProcessingSummary {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AppStatus {
+    pub vault_path: PathBuf,
+    pub db_path: PathBuf,
+    pub ai_provider: String,
+    pub ai_model: String,
+    pub secrets_configured: bool,
+    pub indexed_docs: usize,
+    pub pit_files: usize,
+    pub sop_files: usize,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AiPitResponse {
     pub classification: String,
     pub confidence: f32,

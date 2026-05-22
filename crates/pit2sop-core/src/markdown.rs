@@ -1,7 +1,7 @@
 use crate::models::{RiskLevel, SopSummary};
 use anyhow::{Context, Result, anyhow};
 use chrono::{DateTime, Datelike, Utc};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::HashSet;
 use std::fs;
@@ -64,6 +64,7 @@ pub struct SopMarkdownInput {
     pub triggers: Vec<String>,
     pub related_pit_title: String,
     pub related_pit_id: String,
+    pub related_pit_note_stem: String,
     pub checklist_items: Vec<String>,
 }
 
@@ -72,6 +73,15 @@ pub enum SopWriteOutcome {
     Created { path: PathBuf },
     Updated { path: PathBuf },
     PendingPatch { path: PathBuf, target: PathBuf },
+}
+
+#[derive(Debug, Clone)]
+pub struct MarkdownDocument {
+    pub doc_id: String,
+    pub doc_type: String,
+    pub title: String,
+    pub path: String,
+    pub body: String,
 }
 
 pub fn init_vault_dirs(vault_path: &Path) -> Result<()> {
@@ -107,24 +117,13 @@ pub fn write_pit(vault_path: &Path, input: &PitMarkdownInput) -> Result<PathBuf>
     let year = input.created_at.year();
     let dir = vault_path.join("01_Pits").join(year.to_string());
     fs::create_dir_all(&dir)?;
-    let filename = format!(
-        "{} {}.md",
-        input.created_at.format("%Y-%m-%d"),
-        sanitize_filename(&input.title)
-    );
+    let filename = format!("{}.md", pit_note_stem(input));
     let path = dir.join(filename);
     let relative_path = path_relative_to(vault_path, &path);
     let sop_link = input
         .sop_title
         .as_ref()
-        .map(|title| format!("\"[[{}]]\"", title))
-        .unwrap_or_else(|| "null".to_string());
-    let tag_lines = input
-        .tags
-        .iter()
-        .map(|tag| format!("  - {}", tag))
-        .collect::<Vec<_>>()
-        .join("\n");
+        .map(|title| format!("[[{}]]", title));
     let checklist = if input.checklist_items.is_empty() {
         "- [ ] 需要人工补充可执行检查项".to_string()
     } else {
@@ -135,21 +134,23 @@ pub fn write_pit(vault_path: &Path, input: &PitMarkdownInput) -> Result<PathBuf>
             .collect::<Vec<_>>()
             .join("\n")
     };
+    let frontmatter = PitFrontmatter {
+        doc_type: "pit",
+        id: input.id.clone(),
+        created: input.created_at.to_rfc3339(),
+        source: input.source.clone(),
+        status: input.status.clone(),
+        scenario: input.scenario.clone(),
+        risk: input.risk.as_str().to_string(),
+        recurrence: input.recurrence.as_str().to_string(),
+        sop: sop_link,
+        tags: normalize_tags(&input.tags),
+    };
+    let yaml = serde_yaml::to_string(&frontmatter)?;
 
     let content = format!(
         r#"---
-type: pit
-id: {id}
-created: {created}
-source: {source}
-status: {status}
-scenario: {scenario}
-risk: {risk}
-recurrence: {recurrence}
-sop: {sop_link}
-tags:
-{tags}
----
+{yaml}---
 
 # {title}
 
@@ -180,19 +181,7 @@ tags:
 - 状态：{status}
 - 文件：{relative_path}
 "#,
-        id = input.id,
-        created = input.created_at.to_rfc3339(),
-        source = input.source,
-        status = input.status,
-        scenario = input.scenario,
-        risk = input.risk.as_str(),
-        recurrence = input.recurrence.as_str(),
-        sop_link = sop_link,
-        tags = if tag_lines.is_empty() {
-            "  - pit".to_string()
-        } else {
-            tag_lines
-        },
+        yaml = yaml,
         title = input.title,
         raw_text = input.raw_text,
         symptom = input.symptom,
@@ -200,6 +189,7 @@ tags:
         fix = input.fix,
         prevention_rule = input.prevention_rule,
         checklist = checklist,
+        status = input.status,
         relative_path = relative_path
     );
     atomic_write(&path, &content)?;
@@ -257,8 +247,6 @@ pub fn write_or_patch_sop(vault_path: &Path, input: &SopMarkdownInput) -> Result
     let dir = vault_path.join("02_SOPs").join(&input.category);
     fs::create_dir_all(&dir)?;
     let path = dir.join(format!("{}.md", sanitize_filename(&input.title)));
-    let trigger_lines = yaml_list(&input.triggers);
-    let scenario_lines = yaml_list(std::slice::from_ref(&input.scenario));
     let checklist = input
         .checklist_items
         .iter()
@@ -270,22 +258,22 @@ pub fn write_or_patch_sop(vault_path: &Path, input: &SopMarkdownInput) -> Result
         })
         .collect::<Vec<_>>()
         .join("\n");
+    let pit_link = obsidian_link(&input.related_pit_note_stem, &input.related_pit_title);
+    let frontmatter = SopFrontmatterOut {
+        doc_type: "sop",
+        id: input.id.clone(),
+        version: 1,
+        status: "draft".to_string(),
+        risk: input.risk.as_str().to_string(),
+        scenarios: vec![input.scenario.clone()],
+        triggers: input.triggers.clone(),
+        related_pits: vec![pit_link.clone()],
+        tags: vec!["sop".to_string()],
+    };
+    let yaml = serde_yaml::to_string(&frontmatter)?;
     let content = format!(
         r#"---
-type: sop
-id: {id}
-version: 1
-status: draft
-risk: {risk}
-scenarios:
-{scenarios}
-triggers:
-{triggers}
-related_pits:
-  - "[[{related_pit_title}]]"
-tags:
-  - sop
----
+{yaml}---
 
 # {title}
 
@@ -301,17 +289,13 @@ tags:
 
 ## 历史坑点
 
-- [[{related_pit_title}]]
+- {pit_link}
 
 ## 更新记录
 
-- {date}：根据 [[{related_pit_title}]] 创建 SOP draft。
+- {date}：根据 {pit_link} 创建 SOP draft。
 "#,
-        id = input.id,
-        risk = input.risk.as_str(),
-        scenarios = scenario_lines,
-        triggers = trigger_lines,
-        related_pit_title = input.related_pit_title,
+        yaml = yaml,
         title = input.title,
         scenario = input.scenario,
         start = AUTO_ITEMS_START,
@@ -367,9 +351,7 @@ pub fn load_sop_summaries(vault_path: &Path) -> Result<Vec<SopSummary>> {
     Ok(sops)
 }
 
-pub fn scan_markdown_documents(
-    vault_path: &Path,
-) -> Result<Vec<(String, String, String, String, String)>> {
+pub fn scan_markdown_documents(vault_path: &Path) -> Result<Vec<MarkdownDocument>> {
     let roots = ["01_Pits", "02_SOPs", "03_Scenes"];
     let mut docs = Vec::new();
     for root in roots {
@@ -399,7 +381,13 @@ pub fn scan_markdown_documents(
             let path = path_relative_to_path(vault_path, entry.path());
             let path_string = path.to_string_lossy().to_string();
             let doc_id = stable_id(&doc_type, &path_string);
-            docs.push((doc_id, doc_type, title, path_string, content));
+            docs.push(MarkdownDocument {
+                doc_id,
+                doc_type,
+                title,
+                path: path_string,
+                body: content,
+            });
         }
     }
     Ok(docs)
@@ -430,6 +418,23 @@ pub fn normalize_sop_title(raw: &str, scenario: &str) -> String {
     } else {
         format!("SOP - {}检查", scenario)
     }
+}
+
+pub fn pit_note_stem(input: &PitMarkdownInput) -> String {
+    format!(
+        "{} {} {}",
+        input.created_at.format("%Y-%m-%d"),
+        sanitize_filename(&input.title),
+        short_id(&input.id)
+    )
+}
+
+pub fn short_id(id: &str) -> String {
+    id.trim_start_matches("pit_")
+        .trim_start_matches("cap_")
+        .chars()
+        .take(8)
+        .collect()
 }
 
 pub fn stable_id(prefix: &str, value: &str) -> String {
@@ -564,21 +569,38 @@ fn atomic_write(path: &Path, content: &str) -> Result<()> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)?;
     }
-    let tmp = path.with_extension("tmp");
+    let tmp = temp_sibling_path(path);
     fs::write(&tmp, content)?;
+    #[cfg(windows)]
+    {
+        if path.exists() {
+            let backup = path.with_extension("pit2sop-bak");
+            let _ = fs::remove_file(&backup);
+            fs::rename(path, &backup)?;
+            if let Err(error) = fs::rename(&tmp, path) {
+                let _ = fs::rename(&backup, path);
+                return Err(error.into());
+            }
+            let _ = fs::remove_file(&backup);
+            return Ok(());
+        }
+    }
     fs::rename(&tmp, path)?;
     Ok(())
 }
 
-fn yaml_list(values: &[String]) -> String {
-    if values.is_empty() {
-        return "  - 未分类".to_string();
-    }
-    values
-        .iter()
-        .map(|value| format!("  - {}", value))
-        .collect::<Vec<_>>()
-        .join("\n")
+fn temp_sibling_path(path: &Path) -> PathBuf {
+    let filename = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("pit2sop")
+        .to_string();
+    let tmp_name = format!(
+        ".{}.{}.tmp",
+        filename,
+        Utc::now().timestamp_nanos_opt().unwrap_or_default()
+    );
+    path.with_file_name(tmp_name)
 }
 
 fn strip_item_text(line: &str) -> String {
@@ -637,6 +659,21 @@ fn parse_frontmatter<T: for<'de> Deserialize<'de>>(content: &str) -> Result<Opti
     Ok(Some(parsed))
 }
 
+fn normalize_tags(tags: &[String]) -> Vec<String> {
+    let mut tags = tags.to_vec();
+    if !tags.iter().any(|tag| tag == "pit") {
+        tags.push("pit".to_string());
+    }
+    tags.sort();
+    tags.dedup();
+    tags
+}
+
+fn obsidian_link(note_stem: &str, alias: &str) -> String {
+    let alias = alias.replace('|', "/");
+    format!("[[{}|{}]]", note_stem, alias)
+}
+
 fn frontmatter_type(content: &str) -> Option<String> {
     parse_frontmatter::<GenericFrontmatter>(content)
         .ok()
@@ -668,6 +705,36 @@ struct SopFrontmatter {
     scenarios: Option<Vec<String>>,
     triggers: Option<Vec<String>>,
     related_pits: Option<Vec<String>>,
+}
+
+#[derive(Debug, Serialize)]
+struct PitFrontmatter {
+    #[serde(rename = "type")]
+    doc_type: &'static str,
+    id: String,
+    created: String,
+    source: String,
+    status: String,
+    scenario: String,
+    risk: String,
+    recurrence: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    sop: Option<String>,
+    tags: Vec<String>,
+}
+
+#[derive(Debug, Serialize)]
+struct SopFrontmatterOut {
+    #[serde(rename = "type")]
+    doc_type: &'static str,
+    id: String,
+    version: i64,
+    status: String,
+    risk: String,
+    scenarios: Vec<String>,
+    triggers: Vec<String>,
+    related_pits: Vec<String>,
+    tags: Vec<String>,
 }
 
 #[cfg(test)]
@@ -710,12 +777,123 @@ mod tests {
                 triggers: vec!["release".into()],
                 related_pit_title: "CI secret 未更新".into(),
                 related_pit_id: "pit_1".into(),
+                related_pit_note_stem: "2026-05-22 CI secret 未更新 1".into(),
                 checklist_items: vec!["检查 CI secret".into()],
             },
         )
         .unwrap();
 
         assert!(matches!(outcome, SopWriteOutcome::PendingPatch { .. }));
+    }
+
+    #[test]
+    fn pit_filename_includes_short_id_to_avoid_overwrite() {
+        let temp = tempdir().unwrap();
+        init_vault_dirs(temp.path()).unwrap();
+        let created_at = Utc::now();
+        let mut input = PitMarkdownInput {
+            id: "pit_11111111aaaa".into(),
+            title: "CI secret 未更新".into(),
+            created_at,
+            source: "cli".into(),
+            status: "processed".into(),
+            scenario: "发布流程".into(),
+            risk: RiskLevel::High,
+            recurrence: RiskLevel::Medium,
+            sop_title: None,
+            tags: vec!["pit".into()],
+            raw_text: "第一次".into(),
+            symptom: "失败".into(),
+            root_cause: "secret 旧".into(),
+            fix: "更新 secret".into(),
+            prevention_rule: "检查 secret".into(),
+            checklist_items: vec!["检查 secret".into()],
+        };
+        let first = write_pit(temp.path(), &input).unwrap();
+        input.id = "pit_22222222bbbb".into();
+        input.raw_text = "第二次".into();
+        let second = write_pit(temp.path(), &input).unwrap();
+
+        assert_ne!(first, second);
+        assert!(first.exists());
+        assert!(second.exists());
+        assert!(
+            first
+                .file_stem()
+                .unwrap()
+                .to_string_lossy()
+                .contains("11111111")
+        );
+        assert!(
+            second
+                .file_stem()
+                .unwrap()
+                .to_string_lossy()
+                .contains("22222222")
+        );
+    }
+
+    #[test]
+    fn new_sop_links_to_real_pit_note_stem_with_alias() {
+        let temp = tempdir().unwrap();
+        init_vault_dirs(temp.path()).unwrap();
+        let input = SopMarkdownInput {
+            id: "sop_1".into(),
+            title: "SOP - CI secret 检查".into(),
+            category: "Release".into(),
+            scenario: "发布流程".into(),
+            risk: RiskLevel::High,
+            triggers: vec!["CI".into()],
+            related_pit_title: "CI secret 未更新".into(),
+            related_pit_id: "pit_11111111aaaa".into(),
+            related_pit_note_stem: "2026-05-22 CI secret 未更新 11111111".into(),
+            checklist_items: vec!["检查 CI secret 是否为最新值".into()],
+        };
+
+        let outcome = write_or_patch_sop(temp.path(), &input).unwrap();
+        let path = match outcome {
+            SopWriteOutcome::Created { path } => path,
+            _ => panic!("expected created SOP"),
+        };
+        let content = fs::read_to_string(path).unwrap();
+
+        assert!(content.contains("[[2026-05-22 CI secret 未更新 11111111|CI secret 未更新]]"));
+    }
+
+    #[test]
+    fn pit_frontmatter_survives_yaml_special_chars() {
+        let temp = tempdir().unwrap();
+        init_vault_dirs(temp.path()).unwrap();
+        let input = PitMarkdownInput {
+            id: "pit_yaml0001".into(),
+            title: "标题: \"带引号\"".into(),
+            created_at: Utc::now(),
+            source: "cli".into(),
+            status: "needs_review".into(),
+            scenario: "场景: 含冒号\n第二行".into(),
+            risk: RiskLevel::Medium,
+            recurrence: RiskLevel::Low,
+            sop_title: Some("SOP - 特殊字符".into()),
+            tags: vec!["a:b".into(), "quote\"tag".into()],
+            raw_text: "原始内容".into(),
+            symptom: "症状".into(),
+            root_cause: "根因".into(),
+            fix: "修复".into(),
+            prevention_rule: "规则".into(),
+            checklist_items: vec!["检查 YAML".into()],
+        };
+        let path = write_pit(temp.path(), &input).unwrap();
+        let content = fs::read_to_string(path).unwrap();
+        let yaml = content
+            .strip_prefix("---\n")
+            .unwrap()
+            .split("\n---")
+            .next()
+            .unwrap();
+        let value: serde_yaml::Value = serde_yaml::from_str(yaml).unwrap();
+
+        assert_eq!(value["scenario"], "场景: 含冒号\n第二行");
+        assert_eq!(value["tags"][0], "a:b");
     }
 
     #[test]

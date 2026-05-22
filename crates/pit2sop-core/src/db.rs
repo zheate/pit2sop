@@ -8,6 +8,28 @@ pub struct Database {
     conn: Connection,
 }
 
+pub struct PitRecord<'a> {
+    pub id: &'a str,
+    pub capture_id: &'a str,
+    pub title: &'a str,
+    pub scenario: &'a str,
+    pub risk: &'a str,
+    pub recurrence: &'a str,
+    pub sop_title: Option<&'a str>,
+    pub file_path: &'a str,
+    pub created_at: &'a str,
+}
+
+pub struct SopRecord<'a> {
+    pub id: &'a str,
+    pub title: &'a str,
+    pub status: &'a str,
+    pub risk: &'a str,
+    pub version: i64,
+    pub file_path: &'a str,
+    pub updated_at: &'a str,
+}
+
 impl Database {
     pub fn open(path: &Path) -> Result<Self> {
         if let Some(parent) = path.parent() {
@@ -78,12 +100,36 @@ impl Database {
                 created_at TEXT NOT NULL
             );
 
-            CREATE VIRTUAL TABLE IF NOT EXISTS search_index USING fts5(
-                doc_id,
-                doc_type,
-                title,
-                path,
-                body
+            "#,
+        )?;
+        self.ensure_plain_search_index()?;
+        Ok(())
+    }
+
+    fn ensure_plain_search_index(&self) -> Result<()> {
+        let existing_sql: Option<String> = self
+            .conn
+            .query_row(
+                "SELECT sql FROM sqlite_master WHERE name = 'search_index'",
+                [],
+                |row| row.get(0),
+            )
+            .optional()?;
+        if existing_sql
+            .as_deref()
+            .is_some_and(|sql| sql.to_ascii_uppercase().contains("VIRTUAL TABLE"))
+        {
+            self.conn
+                .execute_batch("DROP TABLE IF EXISTS search_index;")?;
+        }
+        self.conn.execute_batch(
+            r#"
+            CREATE TABLE IF NOT EXISTS search_index (
+                doc_id TEXT PRIMARY KEY,
+                doc_type TEXT NOT NULL,
+                title TEXT NOT NULL,
+                path TEXT NOT NULL,
+                body TEXT NOT NULL
             );
             "#,
         )?;
@@ -146,18 +192,7 @@ impl Database {
             .map_err(Into::into)
     }
 
-    pub fn upsert_pit(
-        &self,
-        id: &str,
-        capture_id: &str,
-        title: &str,
-        scenario: &str,
-        risk: &str,
-        recurrence: &str,
-        sop_title: Option<&str>,
-        file_path: &str,
-        created_at: &str,
-    ) -> Result<()> {
+    pub fn upsert_pit(&self, record: PitRecord<'_>) -> Result<()> {
         self.conn.execute(
             r#"
             INSERT INTO pits (
@@ -173,22 +208,21 @@ impl Database {
               file_path = excluded.file_path
             "#,
             params![
-                id, capture_id, title, scenario, risk, recurrence, sop_title, file_path, created_at
+                record.id,
+                record.capture_id,
+                record.title,
+                record.scenario,
+                record.risk,
+                record.recurrence,
+                record.sop_title,
+                record.file_path,
+                record.created_at
             ],
         )?;
         Ok(())
     }
 
-    pub fn upsert_sop(
-        &self,
-        id: &str,
-        title: &str,
-        status: &str,
-        risk: &str,
-        version: i64,
-        file_path: &str,
-        updated_at: &str,
-    ) -> Result<()> {
+    pub fn upsert_sop(&self, record: SopRecord<'_>) -> Result<()> {
         self.conn.execute(
             r#"
             INSERT INTO sops (id, title, status, risk, version, file_path, updated_at)
@@ -201,7 +235,15 @@ impl Database {
               file_path = excluded.file_path,
               updated_at = excluded.updated_at
             "#,
-            params![id, title, status, risk, version, file_path, updated_at],
+            params![
+                record.id,
+                record.title,
+                record.status,
+                record.risk,
+                record.version,
+                record.file_path,
+                record.updated_at
+            ],
         )?;
         Ok(())
     }
@@ -220,17 +262,27 @@ impl Database {
         body: &str,
     ) -> Result<()> {
         self.conn.execute(
-            "DELETE FROM search_index WHERE doc_id = ?1",
-            params![doc_id],
-        )?;
-        self.conn.execute(
             r#"
             INSERT INTO search_index (doc_id, doc_type, title, path, body)
             VALUES (?1, ?2, ?3, ?4, ?5)
+            ON CONFLICT(doc_id) DO UPDATE SET
+              doc_type = excluded.doc_type,
+              title = excluded.title,
+              path = excluded.path,
+              body = excluded.body
             "#,
             params![doc_id, doc_type, title, path, body],
         )?;
         Ok(())
+    }
+
+    pub fn count_indexed_docs(&self) -> Result<usize> {
+        self.conn
+            .query_row("SELECT COUNT(*) FROM search_index", [], |row| {
+                row.get::<_, i64>(0)
+            })
+            .map(|count| count as usize)
+            .map_err(Into::into)
     }
 
     pub fn search(&self, query: &str, limit: usize) -> Result<Vec<SearchResult>> {

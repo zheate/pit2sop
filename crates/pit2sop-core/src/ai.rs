@@ -4,6 +4,7 @@ use anyhow::{Context, Result, anyhow};
 use reqwest::blocking::Client;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
+use std::time::Duration;
 
 pub trait AiProvider {
     fn extract_pit(&self, raw_text: &str, existing_sops: &[SopSummary]) -> Result<AiPitResponse>;
@@ -14,8 +15,9 @@ pub fn build_ai_provider(config: &AppConfig, secrets: &Secrets) -> Result<Box<dy
         "deepseek" => {
             let api_key = secrets
                 .deepseek_api_key
-                .as_deref()
+                .clone()
                 .filter(|value| !value.trim().is_empty())
+                .or_else(|| std::env::var("DEEPSEEK_API_KEY").ok())
                 .ok_or_else(|| {
                     anyhow!(
                         "missing DeepSeek API key. Set deepseek_api_key in {}",
@@ -25,8 +27,8 @@ pub fn build_ai_provider(config: &AppConfig, secrets: &Secrets) -> Result<Box<dy
             Ok(Box::new(DeepSeekProvider::new(
                 config.ai.base_url.clone(),
                 config.ai.model.clone(),
-                api_key.to_string(),
-            )))
+                api_key,
+            )?))
         }
         "heuristic" => Ok(Box::new(HeuristicProvider)),
         other => Err(anyhow!("unsupported AI provider: {}", other)),
@@ -36,6 +38,24 @@ pub fn build_ai_provider(config: &AppConfig, secrets: &Secrets) -> Result<Box<dy
 pub fn validate_ai_pit_response(response: &AiPitResponse) -> Result<()> {
     if !(0.0..=1.0).contains(&response.confidence) {
         return Err(anyhow!("AI confidence must be between 0 and 1"));
+    }
+    if !matches!(
+        response.classification.as_str(),
+        "pit" | "doing" | "note" | "log" | "sop_request"
+    ) {
+        return Err(anyhow!(
+            "unsupported AI classification `{}`",
+            response.classification
+        ));
+    }
+    if !matches!(
+        response.sop_action.action_type.as_str(),
+        "update_existing" | "create_new" | "needs_review" | "none"
+    ) {
+        return Err(anyhow!(
+            "unsupported SOP action `{}`",
+            response.sop_action.action_type
+        ));
     }
 
     if response.classification == "pit" {
@@ -68,13 +88,17 @@ struct DeepSeekProvider {
 }
 
 impl DeepSeekProvider {
-    fn new(base_url: String, model: String, api_key: String) -> Self {
-        Self {
+    fn new(base_url: String, model: String, api_key: String) -> Result<Self> {
+        let client = Client::builder()
+            .timeout(Duration::from_secs(45))
+            .build()
+            .context("failed to build DeepSeek HTTP client")?;
+        Ok(Self {
             base_url,
             model,
             api_key,
-            client: Client::new(),
-        }
+            client,
+        })
     }
 
     fn endpoint(&self) -> String {
@@ -152,33 +176,48 @@ impl AiProvider for DeepSeekProvider {
                 },
             ],
             temperature: 0.0,
+            max_tokens: 2048,
             response_format: json!({ "type": "json_object" }),
+            thinking: json!({ "type": "disabled" }),
         };
 
-        let response = self
-            .client
-            .post(self.endpoint())
-            .bearer_auth(&self.api_key)
-            .json(&request)
-            .send()
-            .context("failed to call DeepSeek chat completions")?;
+        let mut last_empty = false;
+        for _ in 0..2 {
+            let response = self
+                .client
+                .post(self.endpoint())
+                .bearer_auth(&self.api_key)
+                .json(&request)
+                .send()
+                .context("failed to call DeepSeek chat completions")?;
 
-        let status = response.status();
-        if !status.is_success() {
-            let body = response.text().unwrap_or_default();
-            return Err(anyhow!("DeepSeek request failed: {} {}", status, body));
+            let status = response.status();
+            if !status.is_success() {
+                let body = response.text().unwrap_or_default();
+                return Err(anyhow!("DeepSeek request failed: {} {}", status, body));
+            }
+
+            let completion: ChatCompletionResponse = response.json()?;
+            let content = completion
+                .choices
+                .first()
+                .map(|choice| choice.message.content.trim())
+                .ok_or_else(|| anyhow!("DeepSeek returned no choices"))?;
+            if content.is_empty() {
+                last_empty = true;
+                continue;
+            }
+            let parsed: AiPitResponse =
+                serde_json::from_str(content).context("failed to parse AI JSON output")?;
+            validate_ai_pit_response(&parsed)?;
+            return Ok(parsed);
         }
 
-        let completion: ChatCompletionResponse = response.json()?;
-        let content = completion
-            .choices
-            .first()
-            .map(|choice| choice.message.content.as_str())
-            .ok_or_else(|| anyhow!("DeepSeek returned no choices"))?;
-        let parsed: AiPitResponse =
-            serde_json::from_str(content).context("failed to parse AI JSON output")?;
-        validate_ai_pit_response(&parsed)?;
-        Ok(parsed)
+        if last_empty {
+            Err(anyhow!("DeepSeek returned empty content twice"))
+        } else {
+            Err(anyhow!("DeepSeek returned no usable content"))
+        }
     }
 }
 
@@ -186,6 +225,20 @@ pub struct HeuristicProvider;
 
 impl AiProvider for HeuristicProvider {
     fn extract_pit(&self, raw_text: &str, existing_sops: &[SopSummary]) -> Result<AiPitResponse> {
+        if raw_text.contains("普通笔记") {
+            return Ok(AiPitResponse {
+                classification: "note".to_string(),
+                confidence: 0.9,
+                pit: None,
+                sop_action: AiSopAction {
+                    action_type: "none".to_string(),
+                    sop_title: String::new(),
+                    checklist_items: Vec::new(),
+                    reason: "heuristic note classification".to_string(),
+                },
+            });
+        }
+
         let scenario = if raw_text.contains("客户") || raw_text.contains("交付") {
             "客户交付"
         } else if raw_text.contains("迁移")
@@ -243,6 +296,7 @@ impl AiProvider for HeuristicProvider {
             vec![scenario.to_string()]
         };
 
+        let no_sop_action = raw_text.contains("不需要 SOP");
         Ok(AiPitResponse {
             classification: "pit".to_string(),
             confidence: 0.86,
@@ -259,7 +313,9 @@ impl AiProvider for HeuristicProvider {
                 trigger_keywords,
             }),
             sop_action: AiSopAction {
-                action_type: if existing_sops.iter().any(|sop| sop.title == sop_title) {
+                action_type: if no_sop_action {
+                    "none".to_string()
+                } else if existing_sops.iter().any(|sop| sop.title == sop_title) {
                     "update_existing".to_string()
                 } else {
                     "create_new".to_string()
@@ -277,7 +333,9 @@ struct ChatCompletionRequest {
     model: String,
     messages: Vec<ChatMessage>,
     temperature: f32,
+    max_tokens: u32,
     response_format: serde_json::Value,
+    thinking: serde_json::Value,
 }
 
 #[derive(Debug, Serialize)]

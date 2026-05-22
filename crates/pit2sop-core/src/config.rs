@@ -133,6 +133,15 @@ impl Secrets {
         restrict_file_permissions(&path)?;
         Ok(())
     }
+
+    pub fn has_deepseek_key(&self) -> bool {
+        self.deepseek_api_key
+            .as_deref()
+            .is_some_and(|value| !value.trim().is_empty())
+            || std::env::var("DEEPSEEK_API_KEY")
+                .map(|value| !value.trim().is_empty())
+                .unwrap_or(false)
+    }
 }
 
 fn restrict_file_permissions(path: &Path) -> Result<()> {
