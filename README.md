@@ -45,6 +45,7 @@ The interactive menu supports:
 3. 搜索 SOP / Pit
 4. 打开 Vault
 5. 重建索引
+6. 待确认 Patch
 ```
 
 ## CLI Commands
@@ -52,19 +53,27 @@ The interactive menu supports:
 Record a pit:
 
 ```bash
-sop pit "今天上线漏了 CI secret，导致 production 请求失败。"
+sop pit 今天上线漏了 CI secret，导致 production 请求失败。
 ```
 
 Check what you are about to do:
 
 ```bash
-sop doing "我要上线 2.5.0"
+sop check 我要上线 2.5.0
 ```
 
 Search generated knowledge:
 
 ```bash
 sop search secret
+```
+
+Review pending SOP patches:
+
+```bash
+sop pending
+sop apply-patch "99_System/Pending Patches/2026-05-22-134500 SOP - 发布流程检查 abc12345.md"
+sop reject-patch "99_System/Pending Patches/2026-05-22-134500 SOP - 发布流程检查 abc12345.md"
 ```
 
 Open the configured vault:
@@ -77,6 +86,18 @@ Rebuild SQLite search cache from Markdown:
 
 ```bash
 sop reindex
+```
+
+Inspect local configuration and cache status:
+
+```bash
+sop status
+```
+
+Use an environment variable for one-off DeepSeek calls:
+
+```bash
+DEEPSEEK_API_KEY=your-key-here sop pit 今天上线漏了 CI secret
 ```
 
 ## Architecture
@@ -116,15 +137,17 @@ The repository includes examples only. Real keys and personal SOP data stay loca
 Run tests:
 
 ```bash
+cargo fmt --check
 cargo test
+cargo clippy --workspace --all-targets -- -D warnings
 ```
 
-Format:
+Optional DeepSeek smoke test:
 
 ```bash
-cargo fmt
+DEEPSEEK_API_KEY=your-key-here cargo test deepseek_smoke -- --ignored
 ```
 
 ## Status
 
-V0.1 is a local CLI prototype. It has no desktop tray, phone app, background agent, or system notification yet.
+V0.1 beta is a local CLI-first build. It has no desktop tray, phone app, background agent, or system notification yet.

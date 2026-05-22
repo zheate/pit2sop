@@ -48,6 +48,9 @@ pub fn validate_ai_pit_response(response: &AiPitResponse) -> Result<()> {
             response.classification
         ));
     }
+    if response.sop_action.action_type.trim().is_empty() {
+        return Err(anyhow!("AI sop_action.type is empty"));
+    }
     if !matches!(
         response.sop_action.action_type.as_str(),
         "update_existing" | "create_new" | "needs_review" | "none"
@@ -225,6 +228,20 @@ pub struct HeuristicProvider;
 
 impl AiProvider for HeuristicProvider {
     fn extract_pit(&self, raw_text: &str, existing_sops: &[SopSummary]) -> Result<AiPitResponse> {
+        if raw_text.contains("无效 AI 响应") {
+            return Ok(AiPitResponse {
+                classification: "pit".to_string(),
+                confidence: 2.0,
+                pit: None,
+                sop_action: AiSopAction {
+                    action_type: "invalid".to_string(),
+                    sop_title: String::new(),
+                    checklist_items: Vec::new(),
+                    reason: "heuristic invalid response fixture".to_string(),
+                },
+            });
+        }
+
         if raw_text.contains("普通笔记") {
             return Ok(AiPitResponse {
                 classification: "note".to_string(),
@@ -297,6 +314,7 @@ impl AiProvider for HeuristicProvider {
         };
 
         let no_sop_action = raw_text.contains("不需要 SOP");
+        let needs_review_action = raw_text.contains("需要人工确认 SOP");
         Ok(AiPitResponse {
             classification: "pit".to_string(),
             confidence: 0.86,
@@ -315,6 +333,8 @@ impl AiProvider for HeuristicProvider {
             sop_action: AiSopAction {
                 action_type: if no_sop_action {
                     "none".to_string()
+                } else if needs_review_action {
+                    "needs_review".to_string()
                 } else if existing_sops.iter().any(|sop| sop.title == sop_title) {
                     "update_existing".to_string()
                 } else {
@@ -325,6 +345,48 @@ impl AiProvider for HeuristicProvider {
                 reason: "heuristic provider fallback".to_string(),
             },
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::AiConfig;
+
+    #[test]
+    #[ignore]
+    fn deepseek_smoke_extracts_structured_pit() {
+        let api_key = std::env::var("DEEPSEEK_API_KEY")
+            .expect("set DEEPSEEK_API_KEY before running this ignored smoke test");
+        let config = AppConfig {
+            vault_path: std::path::PathBuf::from("unused"),
+            language: "zh-CN".to_string(),
+            db_path_override: None,
+            ai: AiConfig {
+                provider: "deepseek".to_string(),
+                model: "deepseek-v4-pro".to_string(),
+                base_url: "https://api.deepseek.com".to_string(),
+            },
+        };
+        let secrets = Secrets {
+            deepseek_api_key: Some(api_key),
+        };
+        let provider = build_ai_provider(&config, &secrets).unwrap();
+        let response = provider
+            .extract_pit(
+                "今天上线漏了 CI secret，导致 production 请求失败，后来更新 secret 修复。",
+                &[],
+            )
+            .unwrap();
+
+        validate_ai_pit_response(&response).unwrap();
+        assert_eq!(response.classification, "pit");
+        let pit = response.pit.unwrap();
+        assert!(!pit.title.trim().is_empty());
+        assert!(
+            !response.sop_action.checklist_items.is_empty()
+                || !pit.prevention_rule.trim().is_empty()
+        );
     }
 }
 

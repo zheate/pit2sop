@@ -33,6 +33,13 @@ enum Commands {
     },
     Open,
     Reindex,
+    Pending,
+    ApplyPatch {
+        path: PathBuf,
+    },
+    RejectPatch {
+        path: PathBuf,
+    },
     Config,
     Status,
 }
@@ -83,6 +90,24 @@ fn main() -> Result<()> {
             let count = app.reindex()?;
             out.reindex(count);
         }
+        Some(Commands::Pending) => {
+            let app = Pit2Sop::load()?;
+            let out = Output::new(&app.config);
+            let patches = app.pending_patches()?;
+            out.pending(&patches);
+        }
+        Some(Commands::ApplyPatch { path }) => {
+            let app = Pit2Sop::load()?;
+            let out = Output::new(&app.config);
+            let summary = app.apply_pending_patch(&path)?;
+            out.patch_action(&summary);
+        }
+        Some(Commands::RejectPatch { path }) => {
+            let app = Pit2Sop::load()?;
+            let out = Output::new(&app.config);
+            let summary = app.reject_pending_patch(&path)?;
+            out.patch_action(&summary);
+        }
         Some(Commands::Config) => {
             let config = AppConfig::load_or_default()?;
             println!("{}", toml_like_config(&config));
@@ -113,6 +138,7 @@ fn run_interactive() -> Result<()> {
             println!("3. Search SOP/Pit");
             println!("4. Open Vault");
             println!("5. Reindex Vault");
+            println!("6. Pending Patches");
             println!("q. Quit");
         } else {
             println!("Pit2SOP");
@@ -121,6 +147,7 @@ fn run_interactive() -> Result<()> {
             println!("3. 搜索 SOP / Pit");
             println!("4. 打开 Vault");
             println!("5. 重建索引");
+            println!("6. 待确认 Patch");
             println!("q. 退出");
         }
 
@@ -164,6 +191,10 @@ fn run_interactive() -> Result<()> {
             "5" => {
                 let count = app.reindex()?;
                 out.reindex(count);
+            }
+            "6" => {
+                let patches = app.pending_patches()?;
+                out.pending(&patches);
             }
             "q" | "Q" => break,
             _ => {
@@ -325,6 +356,50 @@ impl Output {
             println!("Indexed {} Markdown documents.", count);
         } else {
             println!("已索引 {} 个 Markdown 文档。", count);
+        }
+    }
+
+    fn pending(&self, patches: &[pit2sop_core::models::PendingPatchSummary]) {
+        if patches.is_empty() {
+            if self.english {
+                println!("No pending patches.");
+            } else {
+                println!("没有待确认 patch。");
+            }
+            return;
+        }
+
+        for (index, patch) in patches.iter().enumerate() {
+            println!("[{}] {}", index + 1, patch.title);
+            if self.english {
+                println!("    path: {}", patch.path.display());
+                println!("    target: {}", patch.target);
+                println!("    source_pit: {}", patch.source_pit);
+                println!("    status: {}", patch.status);
+            } else {
+                println!("    路径：{}", patch.path.display());
+                println!("    目标：{}", patch.target);
+                println!("    source_pit：{}", patch.source_pit);
+                println!("    状态：{}", patch.status);
+            }
+        }
+    }
+
+    fn patch_action(&self, summary: &pit2sop_core::models::PatchActionSummary) {
+        if self.english {
+            println!("Patch: {}", summary.path.display());
+            println!("Status: {}", summary.status);
+            if let Some(path) = &summary.target_path {
+                println!("Target: {}", path.display());
+            }
+            println!("{}", summary.message);
+        } else {
+            println!("Patch：{}", summary.path.display());
+            println!("状态：{}", summary.status);
+            if let Some(path) = &summary.target_path {
+                println!("目标：{}", path.display());
+            }
+            println!("{}", summary.message);
         }
     }
 
