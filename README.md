@@ -105,6 +105,7 @@ DEEPSEEK_API_KEY=your-key-here sop pit 今天上线漏了 CI secret
 ```text
 crates/pit2sop-cli   -> terminal UI and commands
 crates/pit2sop-core  -> AI, matching, Markdown, SQLite, config
+apps/desktop         -> Tauri 2 desktop shell
 pit2sop_docs         -> product, architecture, and engineering specs
 ```
 

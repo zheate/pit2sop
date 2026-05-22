@@ -1,5 +1,6 @@
 [workspace]
 members = [
+    "apps/desktop/src-tauri",
     "crates/pit2sop-core",
     "crates/pit2sop-cli",
 ]
