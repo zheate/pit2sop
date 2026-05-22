@@ -1,0 +1,7 @@
+vault_path = "/path/to/your/Pit2SOP-vault"
+language = "zh-CN"
+
+[ai]
+provider = "deepseek"
+model = "deepseek-v4-pro"
+base_url = "https://api.deepseek.com"

@@ -1,0 +1,14 @@
+[package]
+name = "pit2sop-cli"
+edition.workspace = true
+license.workspace = true
+version.workspace = true
+
+[[bin]]
+name = "sop"
+path = "src/main.rs"
+
+[dependencies]
+anyhow.workspace = true
+clap.workspace = true
+pit2sop-core = { path = "../pit2sop-core" }
