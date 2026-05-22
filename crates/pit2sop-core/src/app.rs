@@ -1,5 +1,5 @@
 use crate::ai::{build_ai_provider, validate_ai_pit_response};
-use crate::config::{AppConfig, Secrets};
+use crate::config::{AiConfig, AppConfig, Secrets};
 use crate::db::{Database, PitRecord, SopRecord};
 use crate::markdown::{
     PitMarkdownInput, SopMarkdownInput, SopWriteOutcome, apply_pending_sop_patch,
@@ -10,10 +10,11 @@ use crate::markdown::{
 };
 use crate::matcher::match_doing;
 use crate::models::{
-    AppStatus, CaptureStatus, DoingMatch, PatchActionSummary, PendingPatchSummary,
-    ProcessingSummary, RiskLevel, SearchResult, SopSummary,
+    AiHealthCheck, AppStatus, CaptureStatus, DesktopSettings, DoingMatch, PatchActionSummary,
+    PendingPatchSummary, ProcessingSummary, RiskLevel, SaveAiSecretInput, SaveSettingsInput,
+    SearchResult, SecretSaveSummary, SopSummary,
 };
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, anyhow};
 use chrono::Utc;
 use sha2::{Digest, Sha256};
 use std::path::{Path, PathBuf};
@@ -45,6 +46,116 @@ impl Pit2Sop {
         Secrets::default().save_if_missing()?;
         Database::open(&config.db_path())?;
         Ok(config)
+    }
+
+    pub fn settings(&self) -> DesktopSettings {
+        DesktopSettings {
+            vault_path: Some(self.config.vault_path.to_string_lossy().to_string()),
+            language: self.config.language.clone(),
+            ai_provider: self.config.ai.provider.clone(),
+            ai_model: self.config.ai.model.clone(),
+            ai_base_url: (!self.config.ai.base_url.trim().is_empty())
+                .then(|| self.config.ai.base_url.clone()),
+            has_deepseek_api_key: self.secrets.has_deepseek_key(),
+        }
+    }
+
+    pub fn save_settings(input: SaveSettingsInput) -> Result<AppStatus> {
+        let vault_path = non_empty(&input.vault_path, "vault path")?;
+        let provider = normalize_provider(&input.ai_provider)?;
+        let language = if input.language.trim().is_empty() {
+            "zh-CN".to_string()
+        } else {
+            input.language.trim().to_string()
+        };
+        let model = if input.ai_model.trim().is_empty() {
+            default_model_for_provider(&provider).to_string()
+        } else {
+            input.ai_model.trim().to_string()
+        };
+        let base_url = input
+            .ai_base_url
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .unwrap_or_else(|| default_base_url_for_provider(&provider))
+            .to_string();
+
+        let mut config = AppConfig::load_or_default()?;
+        config.vault_path = PathBuf::from(vault_path);
+        config.language = language;
+        config.ai = AiConfig {
+            provider,
+            model,
+            base_url,
+        };
+        init_vault_dirs(&config.vault_path)?;
+        config.save()?;
+        Secrets::default().save_if_missing()?;
+        Database::open(&config.db_path())?;
+
+        let app = Self::load()?;
+        app.reindex()?;
+        app.status()
+    }
+
+    pub fn save_ai_secret(input: SaveAiSecretInput) -> Result<SecretSaveSummary> {
+        let provider = normalize_secret_provider(&input.provider)?;
+        let api_key = non_empty(&input.api_key, "api key")?;
+        let mut secrets = Secrets::load_or_default()?;
+        match provider.as_str() {
+            "deepseek" => secrets.set_deepseek_api_key(Some(api_key.to_string())),
+            _ => unreachable!("normalize_secret_provider only returns supported providers"),
+        }
+        secrets.save()?;
+        let configured = Secrets::load_or_default()?.has_deepseek_key();
+        Ok(SecretSaveSummary {
+            provider,
+            configured,
+        })
+    }
+
+    pub fn clear_ai_secret(provider: &str) -> Result<SecretSaveSummary> {
+        let provider = normalize_secret_provider(provider)?;
+        let mut secrets = Secrets::load_or_default()?;
+        match provider.as_str() {
+            "deepseek" => secrets.set_deepseek_api_key(None),
+            _ => unreachable!("normalize_secret_provider only returns supported providers"),
+        }
+        secrets.save()?;
+        let configured = Secrets::load_or_default()?.has_deepseek_key();
+        Ok(SecretSaveSummary {
+            provider,
+            configured,
+        })
+    }
+
+    pub fn test_ai_provider(&self) -> AiHealthCheck {
+        let provider = self.config.ai.provider.clone();
+        let model = self.config.ai.model.clone();
+        let test = (|| -> Result<()> {
+            let ai_provider = build_ai_provider(&self.config, &self.secrets)?;
+            let response = ai_provider.extract_pit(
+                "今天上线漏了 CI secret，导致 production 请求失败，后来更新 secret 修复。",
+                &load_sop_summaries(&self.config.vault_path)?,
+            )?;
+            validate_ai_pit_response(&response)
+        })();
+
+        match test {
+            Ok(()) => AiHealthCheck {
+                provider,
+                model,
+                ok: true,
+                message: "AI provider 可用".to_string(),
+            },
+            Err(error) => AiHealthCheck {
+                provider,
+                model,
+                ok: false,
+                message: error.to_string(),
+            },
+        }
     }
 
     pub fn process_pit(&self, raw_text: &str) -> Result<ProcessingSummary> {
@@ -477,6 +588,56 @@ fn relative(root: &Path, path: &Path) -> String {
         .to_string()
 }
 
+fn non_empty<'a>(value: &'a str, name: &str) -> Result<&'a str> {
+    let value = value.trim();
+    if value.is_empty() {
+        return Err(anyhow!("{} must not be empty", name));
+    }
+    Ok(value)
+}
+
+fn normalize_provider(provider: &str) -> Result<String> {
+    let provider = if provider.trim().is_empty() {
+        "deepseek"
+    } else {
+        provider.trim()
+    }
+    .to_ascii_lowercase();
+    if matches!(provider.as_str(), "deepseek" | "heuristic") {
+        Ok(provider)
+    } else {
+        Err(anyhow!("unsupported AI provider: {}", provider))
+    }
+}
+
+fn normalize_secret_provider(provider: &str) -> Result<String> {
+    let provider = if provider.trim().is_empty() {
+        "deepseek"
+    } else {
+        provider.trim()
+    }
+    .to_ascii_lowercase();
+    if provider == "deepseek" {
+        Ok(provider)
+    } else {
+        Err(anyhow!("unsupported secret provider: {}", provider))
+    }
+}
+
+fn default_model_for_provider(provider: &str) -> &'static str {
+    match provider {
+        "heuristic" => "heuristic",
+        _ => "deepseek-v4-pro",
+    }
+}
+
+fn default_base_url_for_provider(provider: &str) -> &'static str {
+    match provider {
+        "heuristic" => "local",
+        _ => "https://api.deepseek.com",
+    }
+}
+
 fn guarded_sop_title(
     ai_sop_title: &str,
     scenario: &str,
@@ -556,6 +717,43 @@ mod tests {
         let count = app.reindex().unwrap();
         assert_eq!(count, 0);
         assert!(app.config.vault_path.join("02_SOPs/Release").exists());
+    }
+
+    #[test]
+    fn settings_reflect_config_and_secret_state() {
+        let temp = tempdir().unwrap();
+        let config = test_config(&temp);
+        let app = Pit2Sop::with_config(
+            config.clone(),
+            Secrets {
+                deepseek_api_key: Some("key".to_string()),
+            },
+        );
+
+        let settings = app.settings();
+
+        assert_eq!(
+            settings.vault_path,
+            Some(config.vault_path.to_string_lossy().to_string())
+        );
+        assert_eq!(settings.language, "zh-CN");
+        assert_eq!(settings.ai_provider, "heuristic");
+        assert_eq!(settings.ai_model, "heuristic");
+        assert!(settings.has_deepseek_api_key);
+    }
+
+    #[test]
+    fn heuristic_ai_health_check_succeeds_without_network() {
+        let temp = tempdir().unwrap();
+        let config = test_config(&temp);
+        init_vault_dirs(&config.vault_path).unwrap();
+        let app = Pit2Sop::with_config(config, Secrets::default());
+
+        let health = app.test_ai_provider();
+
+        assert!(health.ok, "{}", health.message);
+        assert_eq!(health.provider, "heuristic");
+        assert_eq!(health.model, "heuristic");
     }
 
     #[test]

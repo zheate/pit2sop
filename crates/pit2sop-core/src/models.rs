@@ -155,6 +155,45 @@ pub struct AppStatus {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DesktopSettings {
+    pub vault_path: Option<String>,
+    pub language: String,
+    pub ai_provider: String,
+    pub ai_model: String,
+    pub ai_base_url: Option<String>,
+    pub has_deepseek_api_key: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SaveSettingsInput {
+    pub vault_path: String,
+    pub language: String,
+    pub ai_provider: String,
+    pub ai_model: String,
+    pub ai_base_url: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SaveAiSecretInput {
+    pub provider: String,
+    pub api_key: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SecretSaveSummary {
+    pub provider: String,
+    pub configured: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AiHealthCheck {
+    pub provider: String,
+    pub model: String,
+    pub ok: bool,
+    pub message: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PendingPatchSummary {
     pub path: PathBuf,
     pub target: String,

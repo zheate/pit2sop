@@ -122,16 +122,29 @@ impl Secrets {
         if path.exists() {
             return Ok(());
         }
+        self.save()
+    }
+
+    pub fn save(&self) -> Result<()> {
+        let path = secrets_path();
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent)?;
         }
         let content = match &self.deepseek_api_key {
-            Some(value) => format!("deepseek_api_key = {:?}\n", value),
+            Some(value) if !value.trim().is_empty() => {
+                format!("deepseek_api_key = {:?}\n", value.trim())
+            }
             None => "deepseek_api_key = \"\"\n".to_string(),
+            Some(_) => "deepseek_api_key = \"\"\n".to_string(),
         };
         fs::write(&path, content)?;
         restrict_file_permissions(&path)?;
         Ok(())
+    }
+
+    pub fn set_deepseek_api_key(&mut self, api_key: Option<String>) {
+        self.deepseek_api_key =
+            api_key.and_then(|value| (!value.trim().is_empty()).then(|| value.trim().to_string()));
     }
 
     pub fn has_deepseek_key(&self) -> bool {

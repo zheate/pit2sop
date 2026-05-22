@@ -1,16 +1,20 @@
 import { useEffect, useMemo, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
-import { openPath } from "@tauri-apps/plugin-opener";
+import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import {
   CheckCircle2,
   FileCheck2,
   FolderOpen,
+  KeyRound,
   ListChecks,
+  PlugZap,
   RotateCw,
+  Save,
   Search,
   Send,
   Settings,
   ShieldAlert,
+  Trash2,
   XCircle,
 } from "lucide-react";
 import "./App.css";
@@ -70,6 +74,35 @@ type AppStatus = {
   sop_files: number;
 };
 
+type DesktopSettings = {
+  vault_path?: string | null;
+  language: string;
+  ai_provider: string;
+  ai_model: string;
+  ai_base_url?: string | null;
+  has_deepseek_api_key: boolean;
+};
+
+type SaveSettingsInput = {
+  vault_path: string;
+  language: string;
+  ai_provider: string;
+  ai_model: string;
+  ai_base_url?: string | null;
+};
+
+type SecretSaveSummary = {
+  provider: string;
+  configured: boolean;
+};
+
+type AiHealthCheck = {
+  provider: string;
+  model: string;
+  ok: boolean;
+  message: string;
+};
+
 type TabKey = "pit" | "doing" | "search" | "pending" | "settings";
 
 const tabs: Array<{ key: TabKey; label: string; icon: typeof ShieldAlert }> = [
@@ -79,6 +112,14 @@ const tabs: Array<{ key: TabKey; label: string; icon: typeof ShieldAlert }> = [
   { key: "pending", label: "Pending", icon: FileCheck2 },
   { key: "settings", label: "设置", icon: Settings },
 ];
+
+const defaultSettingsForm: SaveSettingsInput = {
+  vault_path: "",
+  language: "zh-CN",
+  ai_provider: "deepseek",
+  ai_model: "deepseek-v4-pro",
+  ai_base_url: "https://api.deepseek.com",
+};
 
 function App() {
   const [activeTab, setActiveTab] = useState<TabKey>("pit");
@@ -91,6 +132,11 @@ function App() {
   const [query, setQuery] = useState("");
   const [results, setResults] = useState<SearchResult[]>([]);
   const [pending, setPending] = useState<PendingPatch[]>([]);
+  const [settings, setSettings] = useState<DesktopSettings | null>(null);
+  const [settingsForm, setSettingsForm] =
+    useState<SaveSettingsInput>(defaultSettingsForm);
+  const [apiKey, setApiKey] = useState("");
+  const [aiHealth, setAiHealth] = useState<AiHealthCheck | null>(null);
   const [busy, setBusy] = useState("");
   const [notice, setNotice] = useState("");
   const [error, setError] = useState("");
@@ -102,6 +148,7 @@ function App() {
 
   useEffect(() => {
     void refreshStatus();
+    void refreshSettings();
     void refreshPending();
   }, []);
 
@@ -130,9 +177,35 @@ function App() {
     }
   }
 
+  async function refreshSettings() {
+    const next = await invoke<DesktopSettings>("get_settings").catch((cause) => {
+      setStatusError(cause instanceof Error ? cause.message : String(cause));
+      return null;
+    });
+    if (next) applySettings(next);
+  }
+
   async function refreshPending() {
     const next = await invoke<PendingPatch[]>("pending_patches").catch(() => []);
     setPending(next);
+  }
+
+  async function refreshAll() {
+    await refreshStatus();
+    await refreshSettings();
+    await refreshPending();
+  }
+
+  function applySettings(next: DesktopSettings) {
+    setSettings(next);
+    setSettingsForm({
+      vault_path: next.vault_path ?? "",
+      language: next.language || "zh-CN",
+      ai_provider: next.ai_provider || "deepseek",
+      ai_model: next.ai_model || "deepseek-v4-pro",
+      ai_base_url: next.ai_base_url ?? "",
+    });
+    setStatusError("");
   }
 
   async function submitPit() {
@@ -188,7 +261,95 @@ function App() {
   }
 
   async function openVault() {
-    if (status?.vault_path) await openPath(status.vault_path);
+    await run("openVault", () => invoke<void>("open_vault"));
+  }
+
+  async function chooseVault() {
+    const selected = await openDialog({
+      directory: true,
+      multiple: false,
+      title: "选择 Pit2SOP Vault",
+    });
+    if (typeof selected === "string") {
+      setSettingsForm((current) => ({ ...current, vault_path: selected }));
+    }
+  }
+
+  async function saveSettings() {
+    const next = await run("saveSettings", () =>
+      invoke<AppStatus>("save_settings", { input: settingsForm }),
+    );
+    if (next) {
+      setStatus(next);
+      setNotice("设置已保存");
+      await refreshSettings();
+      await refreshPending();
+    }
+  }
+
+  async function saveSecret() {
+    if (!apiKey.trim()) return;
+    const summary = await run("saveSecret", () =>
+      invoke<SecretSaveSummary>("save_ai_secret", {
+        input: {
+          provider: settingsForm.ai_provider,
+          api_key: apiKey,
+        },
+      }),
+    );
+    if (summary) {
+      setApiKey("");
+      setNotice(`${summary.provider} secret 已保存`);
+      await refreshSettings();
+      await refreshStatus();
+    }
+  }
+
+  async function clearSecret() {
+    const summary = await run("clearSecret", () =>
+      invoke<SecretSaveSummary>("clear_ai_secret", { provider: "deepseek" }),
+    );
+    if (summary) {
+      setNotice(`${summary.provider} secret 已清除`);
+      await refreshSettings();
+      await refreshStatus();
+    }
+  }
+
+  async function testAiProvider() {
+    const health = await run("testAi", () =>
+      invoke<AiHealthCheck>("test_ai_provider"),
+    );
+    if (health) {
+      setAiHealth(health);
+      setNotice(health.message);
+    }
+  }
+
+  function updateSettingsField<K extends keyof SaveSettingsInput>(
+    key: K,
+    value: SaveSettingsInput[K],
+  ) {
+    setSettingsForm((current) => ({ ...current, [key]: value }));
+  }
+
+  function updateProvider(provider: string) {
+    setSettingsForm((current) => ({
+      ...current,
+      ai_provider: provider,
+      ai_model:
+        provider === "heuristic"
+          ? "heuristic"
+          : current.ai_model === "heuristic"
+            ? "deepseek-v4-pro"
+            : current.ai_model,
+      ai_base_url:
+        provider === "heuristic"
+          ? "local"
+          : current.ai_base_url === "local" || !current.ai_base_url
+            ? "https://api.deepseek.com"
+            : current.ai_base_url,
+    }));
   }
 
   return (
@@ -232,14 +393,14 @@ function App() {
             <p>{subtitle(activeTab)}</p>
           </div>
           <div className="top-actions">
-            <button className="icon-button" onClick={refreshStatus} type="button">
+            <button className="icon-button" onClick={() => void refreshAll()} type="button">
               <RotateCw size={17} />
               刷新
             </button>
             <button
               className="icon-button"
               disabled={!status?.vault_path}
-              onClick={openVault}
+              onClick={() => void openVault()}
               type="button"
             >
               <FolderOpen size={17} />
@@ -402,17 +563,152 @@ function App() {
           )}
 
           {activeTab === "settings" && (
-            <section className="panel settings-grid">
-              <Metric label="Vault" value={status?.vault_path ?? "-"} />
-              <Metric label="DB" value={status?.db_path ?? "-"} />
-              <Metric label="AI" value={`${status?.ai_provider ?? "-"} / ${status?.ai_model ?? "-"}`} />
-              <Metric
-                label="Secrets"
-                value={status?.secrets_configured ? "configured" : "missing"}
-              />
-              <Metric label="Indexed docs" value={String(status?.indexed_docs ?? 0)} />
-              <Metric label="Pits" value={String(status?.pit_files ?? 0)} />
-              <Metric label="SOPs" value={String(status?.sop_files ?? 0)} />
+            <section className="panel settings-panel">
+              <div className="settings-section">
+                <div className="section-toolbar">
+                  <strong>Vault</strong>
+                  <button
+                    className="icon-button"
+                    disabled={busy === "saveSettings"}
+                    onClick={() => void saveSettings()}
+                    type="button"
+                  >
+                    <Save size={17} />
+                    保存
+                  </button>
+                </div>
+                <label className="field wide">
+                  <span>Vault Path</span>
+                  <div className="path-row">
+                    <input
+                      onChange={(event) =>
+                        updateSettingsField("vault_path", event.currentTarget.value)
+                      }
+                      value={settingsForm.vault_path}
+                    />
+                    <button
+                      className="icon-button"
+                      onClick={() => void chooseVault()}
+                      type="button"
+                    >
+                      <FolderOpen size={17} />
+                      选择
+                    </button>
+                  </div>
+                </label>
+                <label className="field">
+                  <span>Language</span>
+                  <input
+                    onChange={(event) =>
+                      updateSettingsField("language", event.currentTarget.value)
+                    }
+                    value={settingsForm.language}
+                  />
+                </label>
+              </div>
+
+              <div className="settings-section">
+                <div className="section-toolbar">
+                  <strong>AI</strong>
+                  <button
+                    className="icon-button"
+                    disabled={busy === "testAi"}
+                    onClick={() => void testAiProvider()}
+                    type="button"
+                  >
+                    <PlugZap size={17} />
+                    测试
+                  </button>
+                </div>
+                <div className="form-grid">
+                  <label className="field">
+                    <span>Provider</span>
+                    <select
+                      onChange={(event) => updateProvider(event.currentTarget.value)}
+                      value={settingsForm.ai_provider}
+                    >
+                      <option value="deepseek">deepseek</option>
+                      <option value="heuristic">heuristic</option>
+                    </select>
+                  </label>
+                  <label className="field">
+                    <span>Model</span>
+                    <input
+                      onChange={(event) =>
+                        updateSettingsField("ai_model", event.currentTarget.value)
+                      }
+                      value={settingsForm.ai_model}
+                    />
+                  </label>
+                  <label className="field wide">
+                    <span>Base URL</span>
+                    <input
+                      onChange={(event) =>
+                        updateSettingsField("ai_base_url", event.currentTarget.value)
+                      }
+                      value={settingsForm.ai_base_url ?? ""}
+                    />
+                  </label>
+                </div>
+
+                <label className="field wide">
+                  <span>API Key</span>
+                  <div className="path-row">
+                    <input
+                      onChange={(event) => setApiKey(event.currentTarget.value)}
+                      placeholder={
+                        settings?.has_deepseek_api_key ? "configured" : "missing"
+                      }
+                      type="password"
+                      value={apiKey}
+                    />
+                    <button
+                      className="primary-button"
+                      disabled={!apiKey.trim() || busy === "saveSecret"}
+                      onClick={() => void saveSecret()}
+                      type="button"
+                    >
+                      <KeyRound size={17} />
+                      保存
+                    </button>
+                    <button
+                      className="danger-button"
+                      disabled={busy === "clearSecret"}
+                      onClick={() => void clearSecret()}
+                      type="button"
+                    >
+                      <Trash2 size={17} />
+                      清除
+                    </button>
+                  </div>
+                </label>
+
+                {aiHealth && (
+                  <div className={aiHealth.ok ? "health ok" : "health bad"}>
+                    <strong>{aiHealth.ok ? "ok" : "failed"}</strong>
+                    <span>
+                      {aiHealth.provider} / {aiHealth.model}
+                    </span>
+                    <p>{aiHealth.message}</p>
+                  </div>
+                )}
+              </div>
+
+              <div className="settings-grid">
+                <Metric label="Vault" value={status?.vault_path ?? "-"} />
+                <Metric label="DB" value={status?.db_path ?? "-"} />
+                <Metric
+                  label="AI"
+                  value={`${status?.ai_provider ?? "-"} / ${status?.ai_model ?? "-"}`}
+                />
+                <Metric
+                  label="Secrets"
+                  value={status?.secrets_configured ? "configured" : "missing"}
+                />
+                <Metric label="Indexed docs" value={String(status?.indexed_docs ?? 0)} />
+                <Metric label="Pits" value={String(status?.pit_files ?? 0)} />
+                <Metric label="SOPs" value={String(status?.sop_files ?? 0)} />
+              </div>
             </section>
           )}
         </div>

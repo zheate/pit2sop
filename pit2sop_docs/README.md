@@ -153,8 +153,27 @@ Git hook 或 Desktop Agent 识别到 `release` 场景，弹出通知：
 |---|---|
 | 桌面 UI | 记录坑、doing、搜索、Pending Patches、设置 |
 | 托盘 / 菜单栏 | 打开输入框、打开 Vault、退出 |
-| 设置 | Vault path、AI provider、API key |
+| 设置 | Vault path、AI provider、model、base URL、API key、AI 测试 |
 | Core 复用 | Tauri command 直接调用 `pit2sop-core` |
+
+V0.2 的第一条硬边界是配置闭环：新用户不碰 CLI，也能选择 Vault、保存设置、保存 DeepSeek key、测试 AI，并完成 V0.1 的 `pit -> pending/apply -> doing -> search` 流程。API key 只允许进入 Rust command，保存到 `~/.pit2sop/secrets.toml`，前端只显示 configured / missing。
+
+当前桌面命令面向 UI 暴露：
+
+```text
+get_settings
+save_settings
+save_ai_secret
+clear_ai_secret
+test_ai_provider
+open_vault
+process_pit
+doing
+search
+pending_patches
+apply_pending_patch
+reject_pending_patch
+```
 
 ### V0.3 建议实现：桌面 Agent 与提醒
 

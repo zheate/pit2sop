@@ -122,6 +122,28 @@ Core rules:
 <!-- pit2sop:end:auto-items -->
 ```
 
+## Desktop V0.2 Alpha
+
+The desktop app wraps `pit2sop-core` directly through Tauri commands. It does not run the CLI as a sidecar.
+
+Run the local shell:
+
+```bash
+cd apps/desktop
+npm install
+npm run tauri dev
+```
+
+The current desktop settings loop supports:
+
+- Choose and save the Vault path.
+- Initialize the Vault directory structure while saving settings.
+- Save or clear the DeepSeek API key through Rust only.
+- Test the active AI provider.
+- Open the configured Vault.
+
+API keys are stored in `~/.pit2sop/secrets.toml`. The frontend only receives `configured` / `missing` state.
+
 ## Local Files Not Committed
 
 Do not commit:
@@ -150,6 +172,12 @@ Optional DeepSeek smoke test:
 DEEPSEEK_API_KEY=your-key-here cargo test deepseek_smoke -- --ignored
 ```
 
+V0.2 desktop smoke path:
+
+```text
+Settings -> choose/save Vault -> save/test AI key -> record Pit -> apply/reject Pending -> doing -> search -> restart app
+```
+
 ## Status
 
-V0.1 RC is a local CLI-first build. It has no desktop tray, phone app, background agent, or system notification yet.
+V0.1 is the local CLI/core review loop. V0.2 alpha is the Tauri desktop shell and settings loop. It has no phone app, background agent, or system notification yet.
