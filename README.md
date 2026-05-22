@@ -113,6 +113,7 @@ Core rules:
 - Obsidian Markdown is the source of truth.
 - SQLite stores only status and search cache.
 - AI returns structured JSON; Rust code decides what gets written.
+- `sop_action.type = none` still leaves the Pit as `needs_review`; V0.1 treats every Pit as needing either an SOP decision or an explicit human review.
 - Existing SOPs are only auto-updated inside the marker block:
 
 ```markdown
@@ -150,4 +151,4 @@ DEEPSEEK_API_KEY=your-key-here cargo test deepseek_smoke -- --ignored
 
 ## Status
 
-V0.1 beta is a local CLI-first build. It has no desktop tray, phone app, background agent, or system notification yet.
+V0.1 RC is a local CLI-first build. It has no desktop tray, phone app, background agent, or system notification yet.

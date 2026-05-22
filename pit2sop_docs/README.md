@@ -17,7 +17,9 @@ Pit2SOP 不是传统笔记软件，也不是单纯的语音转文字工具。它
 → 执行后继续沉淀经验
 ```
 
-项目优先面向个人自用，因此设计重点是：
+项目优先面向个人自用，但版本边界必须收紧。当前 V0.1 只封 CLI 本地闭环；桌面壳、手机端、通知、Git hook 都是后续阶段。
+
+长期设计重点是：
 
 1. **低摩擦输入**：手机和电脑都能快速记录。
 2. **桌面端主控**：电脑 Agent 负责分析、索引、写入 Obsidian、触发提醒。
@@ -134,35 +136,43 @@ Git hook 或 Desktop Agent 识别到 `release` 场景，弹出通知：
 
 第一版只做闭环，不做复杂生态。
 
-### V0.1 必须实现
+### V0.1 必须实现：CLI-only 本地闭环
 
 | 模块 | 功能 |
 |---|---|
-| 手机端 | 语音输入、文本输入、发送到电脑 |
-| 桌面端 | 托盘 / 菜单栏常驻、接收手机输入、桌面输入 |
-| Obsidian | 自动写入 Markdown |
-| AI | 转写、结构化、生成 Pit、更新 SOP |
-| 索引 | SQLite 存储处理状态和搜索缓存 |
-| 通知 | 桌面通知打开 SOP |
-| CLI | `sop pit`、`sop check`、`sop search` |
+| CLI | `sop pit`、`sop check`、`sop search`、`sop status` |
+| Pending Patch | `sop pending`、`sop apply-patch`、`sop reject-patch` |
+| Obsidian | 自动写入 Pit / SOP / pending patch Markdown |
+| AI | 结构化 Pit，决定创建、更新、待确认或人工 review |
+| 索引 | SQLite 存储处理状态和可重建搜索缓存 |
+| 容错 | 手写 SOP 兼容、坏 frontmatter 不阻断提醒、失败状态可追踪 |
 
-### V0.2 建议实现
+### V0.2 建议实现：Tauri 桌面壳
+
+| 模块 | 功能 |
+|---|---|
+| 桌面 UI | 记录坑、doing、搜索、Pending Patches、设置 |
+| 托盘 / 菜单栏 | 打开输入框、打开 Vault、退出 |
+| 设置 | Vault path、AI provider、API key |
+| Core 复用 | Tauri command 直接调用 `pit2sop-core` |
+
+### V0.3 建议实现：桌面 Agent 与提醒
 
 | 模块 | 功能 |
 |---|---|
 | Git hook | release 分支、tag、push、migration 文件变更触发 |
 | 文件监听 | 监听 migrations、fastlane、CI workflow、env 配置 |
-| 浏览器扩展 | 当前 URL / title / 选中文本发送给 Agent |
-| 云中转 | 电脑不在线时手机先上传，电脑上线后拉取 |
+| 通知 | 桌面通知打开 SOP |
+| 执行记录 | 忽略、稍后提醒、完成状态 |
 
-### V0.3 建议实现
+### V0.4 建议实现：手机输入与外部信号
 
 | 模块 | 功能 |
 |---|---|
-| Obsidian 插件 | 在 SOP 页面上展示 AI 建议和执行记录 |
-| IDE 插件 | VS Code / JetBrains 中提示相关 SOP |
-| 周报复盘 | 高频坑点、复发问题、SOP 覆盖率 |
-| SOP 执行历史 | 记录每次 checklist 执行结果 |
+| 手机端 | 文本 / 语音 / 分享输入、本地队列、扫码配对 |
+| 桌面接收 | LAN API、pairing token、状态查询 |
+| 浏览器扩展 | 当前 URL / title / 选中文本发送给 Agent |
+| 云中转 | 电脑不在线时手机先上传，电脑上线后拉取 |
 
 ---
 
@@ -343,16 +353,11 @@ Agent 更新 SOP 时，只能修改受控区域，例如：
 建议按以下顺序实现：
 
 ```text
-1. Obsidian 文件写入
-2. 桌面 Agent 接收文本输入
-3. AI 生成 Pit Markdown
-4. AI 生成 / 更新 SOP Markdown
-5. 手机端发送输入到桌面端
-6. CLI 输入
-7. 桌面通知
-8. Git hook 触发
-9. 文件监听触发
-10. 浏览器扩展
+1. V0.1：CLI 本地闭环
+2. V0.2：Tauri 桌面壳
+3. V0.3：桌面 Agent、通知、Git hook、文件监听
+4. V0.4：手机输入、浏览器扩展、云中转
+5. V0.5：Obsidian 插件、周报复盘、SOP 执行历史
 ```
 
 ---

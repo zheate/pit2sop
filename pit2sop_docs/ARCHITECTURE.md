@@ -6,7 +6,9 @@
 
 ## 1. 架构总览
 
-Pit2SOP 使用 **手机输入 + 桌面主脑 + Obsidian 本地知识库** 的架构。
+Pit2SOP 的长期形态是 **手机输入 + 桌面主脑 + Obsidian 本地知识库**。
+
+当前 V0.1 收敛为 **CLI-only 本地闭环**：CLI 调用 Rust core，写 Obsidian Markdown，SQLite 只做可重建缓存。Tauri、桌面 Agent、手机输入和外部触发都放在后续阶段。
 
 ```mermaid
 flowchart LR
@@ -782,37 +784,44 @@ pending → sending → delivered → processed
 
 ## 13. 推荐开发路线
 
-### Phase 1：本地闭环
+### Phase 1：V0.1 CLI-only 本地闭环
 
 ```text
-Desktop Agent
++ CLI 输入
 + Obsidian Writer
 + AI Processor
 + SQLite Index
-+ CLI 输入
++ Pending Patch apply/reject
++ Manual doing/search/status
 ```
 
-### Phase 2：手机输入
+### Phase 2：V0.2 Tauri 桌面壳
+
+```text
+Tauri UI
++ record pit / doing / search / pending / settings
++ tray menu
++ global shortcut
++ direct pit2sop-core commands
+```
+
+### Phase 3：V0.3 桌面 Agent 与提醒
+
+```text
+Git Hook
++ File Watcher
++ Desktop Notification
++ Execution State
+```
+
+### Phase 4：V0.4 手机输入与外部信号
 
 ```text
 Mobile App
 + QR 配对
 + LAN 发送
 + 本地队列
-```
-
-### Phase 3：场景触发
-
-```text
-Git Hook
-+ File Watcher
-+ Desktop Notification
-```
-
-### Phase 4：外部信号
-
-```text
-Browser Extension
++ Browser Extension
 + Calendar/Reminder
 + Cloud Relay
 ```

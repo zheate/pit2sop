@@ -1057,22 +1057,46 @@ pit: 今天 CI secret 忘记更新
 
 ## 12. Acceptance Criteria by Phase
 
-## Phase 1：桌面 + Obsidian 闭环
+## Phase 1：V0.1 CLI-only 本地闭环
 
 必须完成：
 
 - [ ] 设置 Obsidian Vault 路径
 - [ ] 初始化目录结构
-- [ ] 桌面输入文本 pit
+- [ ] CLI 输入文本 pit
 - [ ] AI 结构化 Pit
 - [ ] 生成 Pit Markdown
-- [ ] 生成或更新 SOP Markdown
-- [ ] SQLite 记录状态
-- [ ] 可以搜索已生成内容
+- [ ] 生成、更新 SOP Markdown，或生成 pending patch
+- [ ] 可以列出、应用、拒绝 pending patch
+- [ ] `sop check` 可以根据本地 SOP 提醒
+- [ ] `sop search` 可以搜索已生成内容
+- [ ] `sop status` 可以排查 Vault、DB、AI、索引状态
+- [ ] SQLite 只作为可重建状态和搜索缓存
 
-## Phase 2：手机输入
+## Phase 2：V0.2 Tauri 桌面壳
 
 必须完成：
+
+- [ ] 记录一个坑
+- [ ] 我要做一件事
+- [ ] 搜索 SOP / Pit
+- [ ] Pending Patches apply / reject
+- [ ] 设置 Vault path、AI provider、API key
+- [ ] Tauri command 直接调用 `pit2sop-core`
+
+## Phase 3：V0.3 桌面 Agent 与提醒
+
+必须完成：
+
+- [ ] Git hook 触发 release 场景
+- [ ] 文件监听触发 migration 场景
+- [ ] 桌面通知
+- [ ] 点击通知打开 Obsidian SOP
+- [ ] 忽略/稍后提醒状态记录
+
+## Phase 4：V0.4 手机输入与扩展输入源
+
+建议完成：
 
 - [ ] 手机录音
 - [ ] 手机文本输入
@@ -1081,22 +1105,6 @@ pit: 今天 CI secret 忘记更新
 - [ ] LAN 发送 CaptureEvent
 - [ ] 桌面接收并处理
 - [ ] 手机显示 processed 状态
-
-## Phase 3：提醒闭环
-
-必须完成：
-
-- [ ] 手动 doing 触发 SOP 推荐
-- [ ] Git hook 触发 release 场景
-- [ ] 文件监听触发 migration 场景
-- [ ] 桌面通知
-- [ ] 点击通知打开 Obsidian SOP
-- [ ] 忽略/稍后提醒状态记录
-
-## Phase 4：扩展输入源
-
-建议完成：
-
 - [ ] 浏览器扩展
 - [ ] 云中转
 - [ ] 日历/提醒事项读取
@@ -1117,11 +1125,11 @@ pit: 今天 CI secret 忘记更新
 建议默认答案：
 
 ```text
-先做 Mac/Windows 桌面 Agent + iOS 手机输入。
+先封 CLI-only V0.1，再做 Tauri 桌面壳。
 AI 先用云端。
 Obsidian 先用纯 Markdown 文件写入。
 向量索引先用可替换本地缓存。
-插件后置。
+手机、插件、云中转后置。
 ```
 
 ---

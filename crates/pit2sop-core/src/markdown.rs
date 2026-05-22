@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::HashSet;
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use walkdir::WalkDir;
 
 pub const AUTO_ITEMS_START: &str = "<!-- pit2sop:start:auto-items -->";
@@ -344,7 +344,7 @@ pub fn load_sop_summaries(vault_path: &Path) -> Result<Vec<SopSummary>> {
             continue;
         }
         let content = fs::read_to_string(entry.path())?;
-        let frontmatter = parse_frontmatter::<SopFrontmatter>(&content)?;
+        let frontmatter = parse_frontmatter::<SopFrontmatter>(&content).ok().flatten();
         let has_sop_frontmatter =
             frontmatter.as_ref().and_then(|fm| fm.doc_type.as_deref()) == Some("sop");
         let fm_title = frontmatter.as_ref().and_then(|fm| fm.title.clone());
@@ -411,7 +411,8 @@ pub fn scan_markdown_documents(vault_path: &Path) -> Result<Vec<MarkdownDocument
                 continue;
             }
             let content = fs::read_to_string(entry.path())?;
-            let doc_type = frontmatter_type(&content).unwrap_or_else(|| root.to_string());
+            let doc_type =
+                frontmatter_type(&content).unwrap_or_else(|| fallback_doc_type(root).to_string());
             let title = first_heading(&content).unwrap_or_else(|| {
                 entry
                     .path()
@@ -659,11 +660,12 @@ pub fn apply_pending_sop_patch(vault_path: &Path, patch_path: &Path) -> Result<P
     let content =
         fs::read_to_string(&path).with_context(|| format!("failed to read {}", path.display()))?;
     let frontmatter = parse_pending_patch_frontmatter(&content)?;
+    ensure_pending_patch_needs_review(&frontmatter)?;
     let target = frontmatter
         .target
         .as_ref()
         .ok_or_else(|| anyhow!("pending patch is missing target"))?;
-    let target_path = vault_path.join(target);
+    let target_path = resolve_target_inside_vault(vault_path, target)?;
     let checklist_items = extract_pending_checklist_items(&content);
     if checklist_items.is_empty() {
         return Err(anyhow!("pending patch has no checklist items"));
@@ -708,13 +710,17 @@ pub fn reject_pending_sop_patch(
     let content =
         fs::read_to_string(&path).with_context(|| format!("failed to read {}", path.display()))?;
     let frontmatter = parse_pending_patch_frontmatter(&content)?;
+    ensure_pending_patch_needs_review(&frontmatter)?;
+    let target_path = frontmatter
+        .target
+        .as_deref()
+        .map(|target| resolve_target_inside_vault(vault_path, target))
+        .transpose()?;
     mark_pending_patch_status(&path, "rejected")?;
     let final_path = move_completed_patch(vault_path, &path, "Rejected")?;
     Ok(PatchActionSummary {
         path: path_relative_to_path(vault_path, &final_path),
-        target_path: frontmatter
-            .target
-            .map(|target| path_relative_to_path(vault_path, &vault_path.join(target))),
+        target_path: target_path.map(|target| path_relative_to_path(vault_path, &target)),
         status: "rejected".to_string(),
         message: "Pending patch 已拒绝".to_string(),
     })
@@ -1027,6 +1033,20 @@ fn resolve_pending_patch_path(vault_path: &Path, patch_path: &Path) -> PathBuf {
         .join(patch_path)
 }
 
+fn resolve_target_inside_vault(vault_path: &Path, target: &str) -> Result<PathBuf> {
+    let target_path = PathBuf::from(target);
+    if target_path.is_absolute() {
+        return Err(anyhow!("pending patch target must be relative to vault"));
+    }
+    if target_path
+        .components()
+        .any(|component| matches!(component, Component::ParentDir))
+    {
+        return Err(anyhow!("pending patch target must stay inside vault"));
+    }
+    Ok(vault_path.join(target_path))
+}
+
 fn move_completed_patch(vault_path: &Path, path: &Path, folder: &str) -> Result<PathBuf> {
     let dir = vault_path.join("99_System/Pending Patches").join(folder);
     fs::create_dir_all(&dir)?;
@@ -1062,6 +1082,17 @@ fn parse_pending_patch_frontmatter(content: &str) -> Result<PendingPatchFrontmat
         return Err(anyhow!("file is not a pending patch"));
     }
     Ok(frontmatter)
+}
+
+fn ensure_pending_patch_needs_review(frontmatter: &PendingPatchFrontmatter) -> Result<()> {
+    let status = frontmatter.status.as_deref().unwrap_or("needs_review");
+    if status != "needs_review" {
+        return Err(anyhow!(
+            "pending patch status is `{}`, expected `needs_review`",
+            status
+        ));
+    }
+    Ok(())
 }
 
 fn mark_pending_patch_status(path: &Path, status: &str) -> Result<()> {
@@ -1210,6 +1241,15 @@ fn frontmatter_type(content: &str) -> Option<String> {
         .ok()
         .flatten()
         .and_then(|fm| fm.doc_type)
+}
+
+fn fallback_doc_type(root: &str) -> &'static str {
+    match root {
+        "01_Pits" => "pit",
+        "02_SOPs" => "sop",
+        "03_Scenes" => "scene",
+        _ => "markdown",
+    }
 }
 
 fn first_heading(content: &str) -> Option<String> {
@@ -1526,6 +1566,45 @@ mod tests {
     }
 
     #[test]
+    fn load_sop_summaries_ignores_bad_yaml_frontmatter() {
+        let temp = tempdir().unwrap();
+        init_vault_dirs(temp.path()).unwrap();
+        let target = temp.path().join("02_SOPs/Release/SOP - 坏 YAML.md");
+        fs::create_dir_all(target.parent().unwrap()).unwrap();
+        fs::write(
+            &target,
+            format!(
+                "---\ntype: sop\nrisk: \"high\n---\n# SOP - 坏 YAML\n\n{}\n- [ ] 检查坏 YAML 不阻断提醒\n{}\n",
+                AUTO_ITEMS_START, AUTO_ITEMS_END
+            ),
+        )
+        .unwrap();
+
+        let sops = load_sop_summaries(temp.path()).unwrap();
+
+        assert_eq!(sops.len(), 1);
+        assert_eq!(sops[0].title, "SOP - 坏 YAML");
+        assert_eq!(sops[0].checklist_items, vec!["检查坏 YAML 不阻断提醒"]);
+    }
+
+    #[test]
+    fn scan_markdown_documents_indexes_manual_sop_as_sop() {
+        let temp = tempdir().unwrap();
+        init_vault_dirs(temp.path()).unwrap();
+        let target = temp.path().join("02_SOPs/Release/SOP - 手写 SOP.md");
+        fs::create_dir_all(target.parent().unwrap()).unwrap();
+        fs::write(&target, "# SOP - 手写 SOP\n\nmanual").unwrap();
+
+        let docs = scan_markdown_documents(temp.path()).unwrap();
+        let doc = docs
+            .iter()
+            .find(|doc| doc.path.ends_with("SOP - 手写 SOP.md"))
+            .unwrap();
+
+        assert_eq!(doc.doc_type, "sop");
+    }
+
+    #[test]
     fn apply_pending_patch_creates_missing_sop_and_reject_marks_status() {
         let temp = tempdir().unwrap();
         init_vault_dirs(temp.path()).unwrap();
@@ -1563,6 +1642,84 @@ mod tests {
                 .starts_with("99_System/Pending Patches/Rejected")
         );
         assert!(rejected_content.contains("status: rejected"));
+    }
+
+    #[test]
+    fn apply_and_reject_require_needs_review_status() {
+        let temp = tempdir().unwrap();
+        init_vault_dirs(temp.path()).unwrap();
+        let target = temp.path().join("02_SOPs/Release/SOP - 状态检查.md");
+        let input = SopMarkdownInput {
+            id: "sop_1".into(),
+            title: "SOP - 状态检查".into(),
+            category: "Release".into(),
+            scenario: "发布流程".into(),
+            risk: RiskLevel::Medium,
+            triggers: vec!["上线".into()],
+            related_pit_title: "漏配环境变量".into(),
+            related_pit_id: "pit_22222222bbbb".into(),
+            related_pit_note_stem: "2026-05-22 漏配环境变量 22222222".into(),
+            checklist_items: vec!["确认环境变量".into()],
+        };
+        let applied = write_pending_sop_patch(temp.path(), &input, &target).unwrap();
+        mark_pending_patch_status(&applied, "applied").unwrap();
+        let rejected = write_pending_sop_patch(temp.path(), &input, &target).unwrap();
+        mark_pending_patch_status(&rejected, "rejected").unwrap();
+
+        let apply_error = apply_pending_sop_patch(temp.path(), &applied).unwrap_err();
+        let reject_error = reject_pending_sop_patch(temp.path(), &rejected).unwrap_err();
+
+        assert!(apply_error.to_string().contains("expected `needs_review`"));
+        assert!(reject_error.to_string().contains("expected `needs_review`"));
+    }
+
+    #[test]
+    fn pending_patch_target_must_stay_inside_vault() {
+        let temp = tempdir().unwrap();
+        init_vault_dirs(temp.path()).unwrap();
+        let target = temp.path().join("02_SOPs/Release/SOP - 路径检查.md");
+        let input = SopMarkdownInput {
+            id: "sop_1".into(),
+            title: "SOP - 路径检查".into(),
+            category: "Release".into(),
+            scenario: "发布流程".into(),
+            risk: RiskLevel::Medium,
+            triggers: vec!["上线".into()],
+            related_pit_title: "漏配环境变量".into(),
+            related_pit_id: "pit_22222222bbbb".into(),
+            related_pit_note_stem: "2026-05-22 漏配环境变量 22222222".into(),
+            checklist_items: vec!["确认环境变量".into()],
+        };
+        let absolute = write_pending_sop_patch(temp.path(), &input, &target).unwrap();
+        let content = fs::read_to_string(&absolute).unwrap();
+        fs::write(
+            &absolute,
+            content.replace(
+                "target: 02_SOPs/Release/SOP - 路径检查.md",
+                "target: /tmp/outside.md",
+            ),
+        )
+        .unwrap();
+        let parent_dir = write_pending_sop_patch(temp.path(), &input, &target).unwrap();
+        let content = fs::read_to_string(&parent_dir).unwrap();
+        fs::write(
+            &parent_dir,
+            content.replace(
+                "target: 02_SOPs/Release/SOP - 路径检查.md",
+                "target: ../outside.md",
+            ),
+        )
+        .unwrap();
+
+        let absolute_error = apply_pending_sop_patch(temp.path(), &absolute).unwrap_err();
+        let parent_error = apply_pending_sop_patch(temp.path(), &parent_dir).unwrap_err();
+
+        assert!(
+            absolute_error
+                .to_string()
+                .contains("must be relative to vault")
+        );
+        assert!(parent_error.to_string().contains("must stay inside vault"));
     }
 
     #[test]
