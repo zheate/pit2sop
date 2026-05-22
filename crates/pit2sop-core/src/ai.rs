@@ -17,7 +17,11 @@ pub fn build_ai_provider(config: &AppConfig, secrets: &Secrets) -> Result<Box<dy
                 .deepseek_api_key
                 .clone()
                 .filter(|value| !value.trim().is_empty())
-                .or_else(|| std::env::var("DEEPSEEK_API_KEY").ok())
+                .or_else(|| {
+                    std::env::var("DEEPSEEK_API_KEY")
+                        .ok()
+                        .filter(|value| !value.trim().is_empty())
+                })
                 .ok_or_else(|| {
                     anyhow!(
                         "missing DeepSeek API key. Set deepseek_api_key in {}",

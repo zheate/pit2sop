@@ -29,6 +29,21 @@ pub enum CaptureStatus {
     NeedsReview,
 }
 
+impl CaptureStatus {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Created => "created",
+            Self::Queued => "queued",
+            Self::Sending => "sending",
+            Self::Delivered => "delivered",
+            Self::Processing => "processing",
+            Self::Processed => "processed",
+            Self::Failed => "failed",
+            Self::NeedsReview => "needs_review",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum RiskLevel {
@@ -123,6 +138,7 @@ pub struct ProcessingSummary {
     pub pit_path: Option<PathBuf>,
     pub sop_path: Option<PathBuf>,
     pub pending_patch_path: Option<PathBuf>,
+    pub review_path: Option<PathBuf>,
     pub message: String,
 }
 

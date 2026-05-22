@@ -68,6 +68,7 @@ impl Pit2Sop {
                     &capture_id,
                     raw_text,
                     &error.to_string(),
+                    CaptureStatus::Failed,
                 )?;
                 db.mark_capture(
                     &capture_id,
@@ -87,6 +88,7 @@ impl Pit2Sop {
                     &capture_id,
                     raw_text,
                     &error.to_string(),
+                    CaptureStatus::Failed,
                 )?;
                 db.mark_capture(
                     &capture_id,
@@ -103,6 +105,7 @@ impl Pit2Sop {
                 &capture_id,
                 raw_text,
                 &error.to_string(),
+                CaptureStatus::Failed,
             )?;
             db.mark_capture(
                 &capture_id,
@@ -118,8 +121,13 @@ impl Pit2Sop {
                 "AI classified input as `{}` instead of `pit`",
                 ai.classification
             );
-            let path =
-                write_unprocessed_capture(&self.config.vault_path, &capture_id, raw_text, &reason)?;
+            let path = write_unprocessed_capture(
+                &self.config.vault_path,
+                &capture_id,
+                raw_text,
+                &reason,
+                CaptureStatus::NeedsReview,
+            )?;
             db.mark_capture(
                 &capture_id,
                 CaptureStatus::NeedsReview,
@@ -131,7 +139,8 @@ impl Pit2Sop {
                 status: CaptureStatus::NeedsReview,
                 pit_path: None,
                 sop_path: None,
-                pending_patch_path: Some(path),
+                pending_patch_path: None,
+                review_path: Some(path),
                 message: format!("输入被分类为 `{}`，未自动写入 Pit", ai.classification),
             });
         }
@@ -142,6 +151,7 @@ impl Pit2Sop {
                 &capture_id,
                 raw_text,
                 "AI did not return pit fields",
+                CaptureStatus::NeedsReview,
             )?;
             db.mark_capture(
                 &capture_id,
@@ -154,7 +164,8 @@ impl Pit2Sop {
                 status: CaptureStatus::NeedsReview,
                 pit_path: None,
                 sop_path: None,
-                pending_patch_path: Some(path),
+                pending_patch_path: None,
+                review_path: Some(path),
                 message: "AI 没有返回 Pit 字段，已进入待确认".to_string(),
             });
         };
@@ -210,44 +221,83 @@ impl Pit2Sop {
         };
         let related_pit_note_stem = pit_note_stem(&pit_input);
         let pit_path = write_pit(&self.config.vault_path, &pit_input)?;
-        let (sop_path, pending_patch_path) = if let Some(sop_title) = &sop_title {
-            let sop_input = SopMarkdownInput {
-                id: stable_id("sop", sop_title),
-                title: sop_title.clone(),
-                category: category_for_scenario(&pit_fields.scenario),
-                scenario: pit_fields.scenario.clone(),
-                risk: risk.clone(),
-                triggers: pit_fields.trigger_keywords.clone(),
-                related_pit_title: pit_fields.title.clone(),
-                related_pit_id: pit_id.clone(),
-                related_pit_note_stem,
-                checklist_items: checklist_items.clone(),
-            };
-            let sop_outcome = if can_auto_write_sop {
-                write_or_patch_sop(&self.config.vault_path, &sop_input)?
-            } else {
-                let target = self
-                    .config
-                    .vault_path
-                    .join("02_SOPs")
-                    .join(&sop_input.category)
-                    .join(format!("{}.md", sanitize_filename(&sop_input.title)));
-                let pending =
-                    write_pending_sop_patch(&self.config.vault_path, &sop_input, &target)?;
-                SopWriteOutcome::PendingPatch {
-                    path: pending,
-                    target,
-                }
-            };
+        let pit_relative_path = relative(&self.config.vault_path, &pit_path);
+        let now_string = now.to_rfc3339();
+        let sop_result = if let Some(sop_title) = &sop_title {
+            (|| -> Result<(Option<PathBuf>, Option<PathBuf>)> {
+                let sop_input = SopMarkdownInput {
+                    id: stable_id("sop", sop_title),
+                    title: sop_title.clone(),
+                    category: category_for_scenario(&pit_fields.scenario),
+                    scenario: pit_fields.scenario.clone(),
+                    risk: risk.clone(),
+                    triggers: pit_fields.trigger_keywords.clone(),
+                    related_pit_title: pit_fields.title.clone(),
+                    related_pit_id: pit_id.clone(),
+                    related_pit_note_stem,
+                    checklist_items: checklist_items.clone(),
+                };
+                let sop_outcome = if can_auto_write_sop {
+                    write_or_patch_sop(&self.config.vault_path, &sop_input)?
+                } else {
+                    let target = self
+                        .config
+                        .vault_path
+                        .join("02_SOPs")
+                        .join(&sop_input.category)
+                        .join(format!("{}.md", sanitize_filename(&sop_input.title)));
+                    let pending =
+                        write_pending_sop_patch(&self.config.vault_path, &sop_input, &target)?;
+                    SopWriteOutcome::PendingPatch {
+                        path: pending,
+                        target,
+                    }
+                };
 
-            match &sop_outcome {
-                SopWriteOutcome::Created { path } | SopWriteOutcome::Updated { path } => {
-                    (Some(path.clone()), None)
-                }
-                SopWriteOutcome::PendingPatch { path, target: _ } => (None, Some(path.clone())),
-            }
+                Ok(match &sop_outcome {
+                    SopWriteOutcome::Created { path } | SopWriteOutcome::Updated { path } => {
+                        (Some(path.clone()), None)
+                    }
+                    SopWriteOutcome::PendingPatch { path, target: _ } => (None, Some(path.clone())),
+                })
+            })()
         } else {
-            (None, None)
+            Ok((None, None))
+        };
+        let (sop_path, pending_patch_path) = match sop_result {
+            Ok(value) => value,
+            Err(error) => {
+                let mut reviewed_pit_input = pit_input.clone();
+                reviewed_pit_input.status = "needs_review".to_string();
+                write_pit(&self.config.vault_path, &reviewed_pit_input)?;
+                db.upsert_pit(PitRecord {
+                    id: &pit_id,
+                    capture_id: &capture_id,
+                    title: &pit_fields.title,
+                    scenario: &pit_fields.scenario,
+                    risk: risk.as_str(),
+                    recurrence: recurrence.as_str(),
+                    sop_title: sop_title.as_deref(),
+                    file_path: &pit_relative_path,
+                    created_at: &now_string,
+                })?;
+                db.mark_capture(
+                    &capture_id,
+                    CaptureStatus::NeedsReview,
+                    Some(&pit_relative_path),
+                    Some(&error.to_string()),
+                )?;
+                let _ = self.reindex();
+                return Ok(ProcessingSummary {
+                    capture_id,
+                    status: CaptureStatus::NeedsReview,
+                    pit_path: Some(pit_path),
+                    sop_path: None,
+                    pending_patch_path: None,
+                    review_path: None,
+                    message: format!("Pit 已写入，但 SOP 更新失败：{}", error),
+                });
+            }
         };
         if pending_patch_path.is_some() && status == "processed" {
             status = "needs_review".to_string();
@@ -255,8 +305,6 @@ impl Pit2Sop {
             reviewed_pit_input.status = status.clone();
             write_pit(&self.config.vault_path, &reviewed_pit_input)?;
         }
-        let pit_relative_path = relative(&self.config.vault_path, &pit_path);
-        let now_string = now.to_rfc3339();
         db.upsert_pit(PitRecord {
             id: &pit_id,
             capture_id: &capture_id,
@@ -303,6 +351,7 @@ impl Pit2Sop {
             pit_path: Some(pit_path),
             sop_path,
             pending_patch_path,
+            review_path: None,
             message: "Pit 已处理".to_string(),
         })
     }
@@ -338,12 +387,31 @@ impl Pit2Sop {
 
     pub fn apply_pending_patch(&self, path: &Path) -> Result<PatchActionSummary> {
         let summary = apply_pending_sop_patch(&self.config.vault_path, path)?;
+        self.sync_sops_cache()?;
         self.reindex()?;
         Ok(summary)
     }
 
     pub fn reject_pending_patch(&self, path: &Path) -> Result<PatchActionSummary> {
         reject_pending_sop_patch(&self.config.vault_path, path)
+    }
+
+    pub fn sync_sops_cache(&self) -> Result<()> {
+        let db = self.open_db()?;
+        let now = Utc::now().to_rfc3339();
+        for sop in load_sop_summaries(&self.config.vault_path)? {
+            let file_path = sop.obsidian_path.to_string_lossy().to_string();
+            db.upsert_sop(SopRecord {
+                id: &sop.id,
+                title: &sop.title,
+                status: &sop.status,
+                risk: sop.risk_level.as_str(),
+                version: 1,
+                file_path: &file_path,
+                updated_at: &now,
+            })?;
+        }
+        Ok(())
     }
 
     pub fn status(&self) -> Result<AppStatus> {
@@ -528,7 +596,11 @@ mod tests {
 
         assert_eq!(summary.status, CaptureStatus::NeedsReview);
         assert!(summary.pit_path.is_none());
-        assert!(summary.pending_patch_path.unwrap().exists());
+        assert!(summary.pending_patch_path.is_none());
+        let review_path = summary.review_path.unwrap();
+        assert!(review_path.exists());
+        let review_content = fs::read_to_string(review_path).unwrap();
+        assert!(review_content.contains("status: needs_review"));
         assert!(
             fs::read_dir(app.config.vault_path.join("01_Pits"))
                 .unwrap()
@@ -552,6 +624,33 @@ mod tests {
         assert!(summary.pit_path.unwrap().exists());
         assert!(summary.sop_path.is_none());
         assert!(summary.pending_patch_path.is_none());
+    }
+
+    #[test]
+    fn pit_write_success_and_sop_write_failure_marks_needs_review() {
+        let temp = tempdir().unwrap();
+        let config = test_config(&temp);
+        init_vault_dirs(&config.vault_path).unwrap();
+        fs::remove_dir_all(config.vault_path.join("02_SOPs/Release")).unwrap();
+        fs::write(config.vault_path.join("02_SOPs/Release"), "not a directory").unwrap();
+        let app = Pit2Sop::with_config(config, Secrets::default());
+
+        let summary = app
+            .process_pit("今天上线漏了 CI secret，导致 production 请求失败")
+            .unwrap();
+
+        assert_eq!(summary.status, CaptureStatus::NeedsReview);
+        assert!(summary.pit_path.unwrap().exists());
+        assert!(summary.sop_path.is_none());
+        assert!(summary.pending_patch_path.is_none());
+        assert!(summary.message.contains("SOP 更新失败"));
+        let conn = Connection::open(app.config.db_path()).unwrap();
+        let status: String = conn
+            .query_row("SELECT status FROM capture_events LIMIT 1", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(status, "needs_review");
     }
 
     #[test]
@@ -601,6 +700,39 @@ mod tests {
             .query_row("SELECT COUNT(*) FROM sops", [], |row| row.get(0))
             .unwrap();
         assert_eq!(sop_count, 0);
+    }
+
+    #[test]
+    fn apply_pending_patch_syncs_sops_cache() {
+        let temp = tempdir().unwrap();
+        let config = test_config(&temp);
+        init_vault_dirs(&config.vault_path).unwrap();
+        let app = Pit2Sop::with_config(config, Secrets::default());
+        let target = app
+            .config
+            .vault_path
+            .join("02_SOPs/Release/SOP - 发布流程检查.md");
+        let input = SopMarkdownInput {
+            id: "sop_1".into(),
+            title: "SOP - 发布流程检查".into(),
+            category: "Release".into(),
+            scenario: "发布流程".into(),
+            risk: RiskLevel::High,
+            triggers: vec!["上线".into()],
+            related_pit_title: "CI secret 未更新".into(),
+            related_pit_id: "pit_11111111aaaa".into(),
+            related_pit_note_stem: "2026-05-22 CI secret 未更新 11111111".into(),
+            checklist_items: vec!["检查 CI secret".into()],
+        };
+        let patch = write_pending_sop_patch(&app.config.vault_path, &input, &target).unwrap();
+
+        app.apply_pending_patch(&patch).unwrap();
+
+        let conn = Connection::open(app.config.db_path()).unwrap();
+        let sop_count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM sops", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(sop_count, 1);
     }
 
     #[test]

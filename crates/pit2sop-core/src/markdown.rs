@@ -1,4 +1,6 @@
-use crate::models::{PatchActionSummary, PendingPatchSummary, RiskLevel, SopSummary};
+use crate::models::{
+    CaptureStatus, PatchActionSummary, PendingPatchSummary, RiskLevel, SopSummary,
+};
 use anyhow::{Context, Result, anyhow};
 use chrono::{DateTime, Datelike, Utc};
 use serde::{Deserialize, Serialize};
@@ -203,6 +205,7 @@ pub fn write_unprocessed_capture(
     capture_id: &str,
     raw_text: &str,
     reason: &str,
+    status: CaptureStatus,
 ) -> Result<PathBuf> {
     let dir = vault_path.join("00_Inbox/Unprocessed");
     fs::create_dir_all(&dir)?;
@@ -211,7 +214,7 @@ pub fn write_unprocessed_capture(
         r#"---
 type: unprocessed_capture
 id: {capture_id}
-status: failed
+status: {status}
 ---
 
 # Unprocessed Capture {capture_id}
@@ -223,7 +226,8 @@ status: failed
 ## 失败原因
 
 {reason}
-"#
+"#,
+        status = status.as_str()
     );
     atomic_write(&path, &content)?;
     Ok(path)
@@ -233,8 +237,22 @@ pub fn write_or_patch_sop(vault_path: &Path, input: &SopMarkdownInput) -> Result
     if let Some(existing) = find_sop_by_title(vault_path, &input.title)? {
         let content = fs::read_to_string(&existing)?;
         if content.contains(AUTO_ITEMS_START) && content.contains(AUTO_ITEMS_END) {
+            let pit_link = obsidian_link(&input.related_pit_note_stem, &input.related_pit_title);
+            let pending_frontmatter = PendingPatchFrontmatter {
+                doc_type: Some("pending_patch".to_string()),
+                target: Some(path_relative_to(vault_path, &existing)),
+                source_pit: Some(input.related_pit_id.clone()),
+                status: Some("needs_review".to_string()),
+                title: Some(input.title.clone()),
+                scenario: Some(input.scenario.clone()),
+                risk: Some(input.risk.as_str().to_string()),
+                triggers: Some(input.triggers.clone()),
+                related_pit: Some(pit_link.clone()),
+            };
+            let content = ensure_sop_frontmatter(&content, &pending_frontmatter, &existing)?;
             let patched =
                 patch_auto_items(&content, &input.checklist_items, &input.related_pit_id)?;
+            let patched = append_update_log(&patched, Some(&pit_link));
             atomic_write(&existing, &patched)?;
             return Ok(SopWriteOutcome::Updated { path: existing });
         }
@@ -326,26 +344,48 @@ pub fn load_sop_summaries(vault_path: &Path) -> Result<Vec<SopSummary>> {
             continue;
         }
         let content = fs::read_to_string(entry.path())?;
-        let Some(frontmatter) = parse_frontmatter::<SopFrontmatter>(&content)? else {
-            continue;
-        };
-        if frontmatter.doc_type.as_deref() != Some("sop") {
-            continue;
-        }
-        let fm_title = frontmatter.title.clone();
+        let frontmatter = parse_frontmatter::<SopFrontmatter>(&content)?;
+        let has_sop_frontmatter =
+            frontmatter.as_ref().and_then(|fm| fm.doc_type.as_deref()) == Some("sop");
+        let fm_title = frontmatter.as_ref().and_then(|fm| fm.title.clone());
         let title = first_heading(&content)
             .or(fm_title.clone())
-            .unwrap_or_else(|| "Untitled SOP".to_string());
+            .unwrap_or_else(|| file_stem(entry.path()));
+        let category_signal = entry
+            .path()
+            .parent()
+            .and_then(|parent| parent.file_name())
+            .and_then(|name| name.to_str())
+            .unwrap_or_default()
+            .to_string();
         sops.push(SopSummary {
             id: frontmatter
-                .id
+                .as_ref()
+                .and_then(|fm| fm.id.clone())
                 .unwrap_or_else(|| stable_id("sop", fm_title.as_deref().unwrap_or(&title))),
-            title,
-            status: frontmatter.status.unwrap_or_else(|| "draft".to_string()),
-            risk_level: RiskLevel::from_ai(frontmatter.risk.as_deref().unwrap_or("low")),
-            scenarios: frontmatter.scenarios.unwrap_or_default(),
-            triggers: frontmatter.triggers.unwrap_or_default(),
-            related_pits: frontmatter.related_pits.unwrap_or_default(),
+            title: title.clone(),
+            status: frontmatter
+                .as_ref()
+                .and_then(|fm| fm.status.clone())
+                .unwrap_or_else(|| "draft".to_string()),
+            risk_level: RiskLevel::from_ai(
+                frontmatter
+                    .as_ref()
+                    .and_then(|fm| fm.risk.as_deref())
+                    .unwrap_or(if has_sop_frontmatter { "low" } else { "medium" }),
+            ),
+            scenarios: frontmatter
+                .as_ref()
+                .and_then(|fm| fm.scenarios.clone())
+                .unwrap_or_else(|| vec![title.clone(), category_signal.clone()]),
+            triggers: frontmatter
+                .as_ref()
+                .and_then(|fm| fm.triggers.clone())
+                .unwrap_or_else(|| infer_triggers_from_text(&format!("{title} {content}"))),
+            related_pits: frontmatter
+                .as_ref()
+                .and_then(|fm| fm.related_pits.clone())
+                .unwrap_or_default(),
             checklist_items: extract_checklist_items(&content),
             obsidian_path: path_relative_to_path(vault_path, entry.path()),
         });
@@ -632,6 +672,7 @@ pub fn apply_pending_sop_patch(vault_path: &Path, patch_path: &Path) -> Result<P
 
     if target_path.exists() {
         let target_content = fs::read_to_string(&target_path)?;
+        let target_content = ensure_sop_frontmatter(&target_content, &frontmatter, &target_path)?;
         let patched = if target_content.contains(AUTO_ITEMS_START)
             && target_content.contains(AUTO_ITEMS_END)
         {
@@ -639,6 +680,7 @@ pub fn apply_pending_sop_patch(vault_path: &Path, patch_path: &Path) -> Result<P
         } else {
             append_auto_items_block(&target_content, &checklist_items, source_pit)
         };
+        let patched = append_update_log(&patched, frontmatter.related_pit.as_deref());
         atomic_write(&target_path, &patched)?;
     } else {
         if let Some(parent) = target_path.parent() {
@@ -649,8 +691,9 @@ pub fn apply_pending_sop_patch(vault_path: &Path, patch_path: &Path) -> Result<P
     }
 
     mark_pending_patch_status(&path, "applied")?;
+    let final_path = move_completed_patch(vault_path, &path, "Applied")?;
     Ok(PatchActionSummary {
-        path: path_relative_to_path(vault_path, &path),
+        path: path_relative_to_path(vault_path, &final_path),
         target_path: Some(path_relative_to_path(vault_path, &target_path)),
         status: "applied".to_string(),
         message: "Pending patch 已应用".to_string(),
@@ -666,8 +709,9 @@ pub fn reject_pending_sop_patch(
         fs::read_to_string(&path).with_context(|| format!("failed to read {}", path.display()))?;
     let frontmatter = parse_pending_patch_frontmatter(&content)?;
     mark_pending_patch_status(&path, "rejected")?;
+    let final_path = move_completed_patch(vault_path, &path, "Rejected")?;
     Ok(PatchActionSummary {
-        path: path_relative_to_path(vault_path, &path),
+        path: path_relative_to_path(vault_path, &final_path),
         target_path: frontmatter
             .target
             .map(|target| path_relative_to_path(vault_path, &vault_path.join(target))),
@@ -779,6 +823,68 @@ fn extract_pending_checklist_items(content: &str) -> Vec<String> {
         .collect()
 }
 
+fn ensure_sop_frontmatter(
+    content: &str,
+    pending: &PendingPatchFrontmatter,
+    target_path: &Path,
+) -> Result<String> {
+    let title = pending
+        .title
+        .clone()
+        .unwrap_or_else(|| file_stem(target_path));
+    let mut mapping = if let Some((yaml, _)) = split_frontmatter(content) {
+        serde_yaml::from_str::<serde_yaml::Mapping>(yaml)?
+    } else {
+        serde_yaml::Mapping::new()
+    };
+    mapping.insert(
+        serde_yaml::Value::String("type".to_string()),
+        serde_yaml::Value::String("sop".to_string()),
+    );
+    insert_if_missing(
+        &mut mapping,
+        "id",
+        serde_yaml::Value::String(stable_id("sop", &title)),
+    );
+    insert_if_missing(
+        &mut mapping,
+        "version",
+        serde_yaml::Value::Number(serde_yaml::Number::from(1)),
+    );
+    insert_if_missing(
+        &mut mapping,
+        "status",
+        serde_yaml::Value::String("draft".to_string()),
+    );
+    insert_if_missing(
+        &mut mapping,
+        "risk",
+        serde_yaml::Value::String(pending.risk.clone().unwrap_or_else(|| "medium".to_string())),
+    );
+    upsert_string_sequence(
+        &mut mapping,
+        "scenarios",
+        pending.scenario.clone().into_iter().collect(),
+    );
+    upsert_string_sequence(
+        &mut mapping,
+        "triggers",
+        pending.triggers.clone().unwrap_or_default(),
+    );
+    upsert_string_sequence(
+        &mut mapping,
+        "related_pits",
+        pending.related_pit.clone().into_iter().collect(),
+    );
+    upsert_string_sequence(&mut mapping, "tags", vec!["sop".to_string()]);
+
+    let yaml = serde_yaml::to_string(&mapping)?;
+    let body = split_frontmatter(content)
+        .map(|(_, body)| body.trim_start())
+        .unwrap_or_else(|| content.trim_start());
+    Ok(format!("---\n{}---\n\n{}", yaml, body))
+}
+
 fn append_auto_items_block(content: &str, items: &[String], source_id: &str) -> String {
     let checklist = items
         .iter()
@@ -798,6 +904,29 @@ fn append_auto_items_block(content: &str, items: &[String], source_id: &str) -> 
         checklist,
         AUTO_ITEMS_END
     )
+}
+
+fn append_update_log(content: &str, pit_link: Option<&str>) -> String {
+    let Some(pit_link) = pit_link.filter(|value| !value.trim().is_empty()) else {
+        return content.to_string();
+    };
+    if content.contains(&format!("根据 {} 新增检查项", pit_link)) {
+        return content.to_string();
+    }
+    let line = format!(
+        "- {}：根据 {} 新增检查项。",
+        Utc::now().format("%Y-%m-%d"),
+        pit_link
+    );
+    if content.contains("## Pit2SOP 更新记录") {
+        format!("{}\n{}", content.trim_end(), line)
+    } else {
+        format!(
+            "{}\n\n## Pit2SOP 更新记录\n\n{}\n",
+            content.trim_end(),
+            line
+        )
+    }
 }
 
 fn new_sop_from_pending_patch(
@@ -898,6 +1027,33 @@ fn resolve_pending_patch_path(vault_path: &Path, patch_path: &Path) -> PathBuf {
         .join(patch_path)
 }
 
+fn move_completed_patch(vault_path: &Path, path: &Path, folder: &str) -> Result<PathBuf> {
+    let dir = vault_path.join("99_System/Pending Patches").join(folder);
+    fs::create_dir_all(&dir)?;
+    let filename = path
+        .file_name()
+        .ok_or_else(|| anyhow!("pending patch path has no file name"))?;
+    let mut destination = dir.join(filename);
+    if destination.exists() {
+        let stem = destination
+            .file_stem()
+            .and_then(|stem| stem.to_str())
+            .unwrap_or("pending_patch");
+        let ext = destination
+            .extension()
+            .and_then(|ext| ext.to_str())
+            .unwrap_or("md");
+        destination = dir.join(format!(
+            "{}-{}.{}",
+            stem,
+            Utc::now().timestamp_nanos_opt().unwrap_or_default(),
+            ext
+        ));
+    }
+    fs::rename(path, &destination)?;
+    Ok(destination)
+}
+
 fn parse_pending_patch_frontmatter(content: &str) -> Result<PendingPatchFrontmatter> {
     let Some(frontmatter) = parse_frontmatter::<PendingPatchFrontmatter>(content)? else {
         return Err(anyhow!("pending patch is missing frontmatter"));
@@ -926,6 +1082,89 @@ fn mark_pending_patch_status(path: &Path, status: &str) -> Result<()> {
     let updated_yaml = serde_yaml::to_string(&mapping)?;
     atomic_write(path, &format!("---\n{}---{}", updated_yaml, body))?;
     Ok(())
+}
+
+fn split_frontmatter(content: &str) -> Option<(&str, &str)> {
+    let rest = content.strip_prefix("---\n")?;
+    let end = rest.find("\n---")?;
+    Some((&rest[..end], &rest[end + "\n---".len()..]))
+}
+
+fn insert_if_missing(mapping: &mut serde_yaml::Mapping, key: &str, value: serde_yaml::Value) {
+    let key_value = serde_yaml::Value::String(key.to_string());
+    if !mapping.contains_key(&key_value) {
+        mapping.insert(key_value, value);
+    }
+}
+
+fn upsert_string_sequence(mapping: &mut serde_yaml::Mapping, key: &str, values: Vec<String>) {
+    let mut values = values
+        .into_iter()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+        .collect::<Vec<_>>();
+    if values.is_empty() {
+        return;
+    }
+    let key_value = serde_yaml::Value::String(key.to_string());
+    let existing = mapping
+        .get(&key_value)
+        .and_then(|value| value.as_sequence())
+        .cloned()
+        .unwrap_or_default();
+    for item in existing {
+        if let Some(value) = item.as_str() {
+            values.push(value.to_string());
+        }
+    }
+    values.sort();
+    values.dedup();
+    mapping.insert(
+        key_value,
+        serde_yaml::Value::Sequence(
+            values
+                .into_iter()
+                .map(serde_yaml::Value::String)
+                .collect::<Vec<_>>(),
+        ),
+    );
+}
+
+fn file_stem(path: &Path) -> String {
+    path.file_stem()
+        .and_then(|stem| stem.to_str())
+        .unwrap_or("Untitled SOP")
+        .to_string()
+}
+
+fn infer_triggers_from_text(value: &str) -> Vec<String> {
+    [
+        "上线",
+        "发布",
+        "release",
+        "CI",
+        "secret",
+        "数据库",
+        "迁移",
+        "migration",
+        "客户",
+        "交付",
+        "PBS",
+        "装反",
+        "组装",
+    ]
+    .into_iter()
+    .filter(|trigger| {
+        if trigger.is_ascii() {
+            value
+                .to_ascii_lowercase()
+                .contains(&trigger.to_ascii_lowercase())
+        } else {
+            value.contains(trigger)
+        }
+    })
+    .map(str::to_string)
+    .collect()
 }
 
 fn path_relative_to(vault_path: &Path, path: &Path) -> String {
@@ -1211,12 +1450,79 @@ mod tests {
 
         let summary = apply_pending_sop_patch(temp.path(), &patch).unwrap();
         let target_content = fs::read_to_string(&target).unwrap();
-        let patch_content = fs::read_to_string(&patch).unwrap();
+        let patch_content = fs::read_to_string(temp.path().join(&summary.path)).unwrap();
 
         assert_eq!(summary.status, "applied");
+        assert!(
+            summary
+                .path
+                .starts_with("99_System/Pending Patches/Applied")
+        );
         assert!(target_content.contains("- [ ] 旧检查"));
         assert!(target_content.contains("检查 CI secret <!-- pit2sop:source=pit_11111111aaaa -->"));
+        assert!(
+            target_content.contains("[[2026-05-22 CI secret 未更新 11111111|CI secret 未更新]]")
+        );
+        assert!(target_content.contains("## Pit2SOP 更新记录"));
         assert!(patch_content.contains("status: applied"));
+    }
+
+    #[test]
+    fn apply_pending_patch_adds_frontmatter_to_manual_sop_and_loader_falls_back() {
+        let temp = tempdir().unwrap();
+        init_vault_dirs(temp.path()).unwrap();
+        let target = temp.path().join("02_SOPs/Release/SOP - 手写发布检查.md");
+        fs::create_dir_all(target.parent().unwrap()).unwrap();
+        fs::write(&target, "# SOP - 手写发布检查\n\nmanual").unwrap();
+        let input = SopMarkdownInput {
+            id: "sop_1".into(),
+            title: "SOP - 手写发布检查".into(),
+            category: "Release".into(),
+            scenario: "发布流程".into(),
+            risk: RiskLevel::High,
+            triggers: vec!["上线".into()],
+            related_pit_title: "CI secret 未更新".into(),
+            related_pit_id: "pit_11111111aaaa".into(),
+            related_pit_note_stem: "2026-05-22 CI secret 未更新 11111111".into(),
+            checklist_items: vec!["检查 CI secret".into()],
+        };
+        let patch = write_pending_sop_patch(temp.path(), &input, &target).unwrap();
+
+        apply_pending_sop_patch(temp.path(), &patch).unwrap();
+
+        let target_content = fs::read_to_string(&target).unwrap();
+        assert!(target_content.starts_with("---\n"));
+        assert!(target_content.contains("type: sop"));
+        assert!(target_content.contains("triggers:"));
+        assert!(target_content.contains("上线"));
+        let sops = load_sop_summaries(temp.path()).unwrap();
+        assert_eq!(sops.len(), 1);
+        assert_eq!(sops[0].title, "SOP - 手写发布检查");
+        assert_eq!(sops[0].checklist_items, vec!["检查 CI secret"]);
+        assert!(sops[0].triggers.contains(&"上线".to_string()));
+    }
+
+    #[test]
+    fn load_sop_summaries_includes_manual_sop_without_frontmatter() {
+        let temp = tempdir().unwrap();
+        init_vault_dirs(temp.path()).unwrap();
+        let target = temp.path().join("02_SOPs/Release/SOP - PBS 装反检查.md");
+        fs::create_dir_all(target.parent().unwrap()).unwrap();
+        fs::write(
+            &target,
+            format!(
+                "# SOP - PBS 装反检查\n\n{}\n- [ ] 检查 PBS 方向\n{}\n",
+                AUTO_ITEMS_START, AUTO_ITEMS_END
+            ),
+        )
+        .unwrap();
+
+        let sops = load_sop_summaries(temp.path()).unwrap();
+
+        assert_eq!(sops.len(), 1);
+        assert_eq!(sops[0].title, "SOP - PBS 装反检查");
+        assert!(sops[0].triggers.contains(&"PBS".to_string()));
+        assert_eq!(sops[0].checklist_items, vec!["检查 PBS 方向"]);
     }
 
     #[test]
@@ -1249,8 +1555,13 @@ mod tests {
 
         let rejected = write_pending_sop_patch(temp.path(), &input, &target).unwrap();
         let summary = reject_pending_sop_patch(temp.path(), &rejected).unwrap();
-        let rejected_content = fs::read_to_string(&rejected).unwrap();
+        let rejected_content = fs::read_to_string(temp.path().join(&summary.path)).unwrap();
         assert_eq!(summary.status, "rejected");
+        assert!(
+            summary
+                .path
+                .starts_with("99_System/Pending Patches/Rejected")
+        );
         assert!(rejected_content.contains("status: rejected"));
     }
 

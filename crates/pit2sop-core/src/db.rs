@@ -311,16 +311,7 @@ impl Database {
 }
 
 fn status_to_str(status: &CaptureStatus) -> &'static str {
-    match status {
-        CaptureStatus::Created => "created",
-        CaptureStatus::Queued => "queued",
-        CaptureStatus::Sending => "sending",
-        CaptureStatus::Delivered => "delivered",
-        CaptureStatus::Processing => "processing",
-        CaptureStatus::Processed => "processed",
-        CaptureStatus::Failed => "failed",
-        CaptureStatus::NeedsReview => "needs_review",
-    }
+    status.as_str()
 }
 
 fn make_snippet(body: &str, query: &str) -> String {

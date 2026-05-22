@@ -274,6 +274,9 @@ impl Output {
             if let Some(path) = &summary.pending_patch_path {
                 println!("Pending patch: {}", path.display());
             }
+            if let Some(path) = &summary.review_path {
+                println!("Needs review: {}", path.display());
+            }
             println!("{}", summary.message);
         } else {
             println!("状态：{:?}", summary.status);
@@ -285,7 +288,10 @@ impl Output {
                 println!("SOP：{}", path.display());
             }
             if let Some(path) = &summary.pending_patch_path {
-                println!("待确认 patch：{}", path.display());
+                println!("待确认 SOP patch：{}", path.display());
+            }
+            if let Some(path) = &summary.review_path {
+                println!("待人工确认记录：{}", path.display());
             }
             println!("{}", summary.message);
         }
