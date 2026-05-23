@@ -112,3 +112,28 @@ Result:
 - Reject path: pass. Clicking Reject moved the patch to `99_System/Pending Patches/Rejected/` and refreshed the Pending list from 1 item to empty.
 - Reject source Pit closure: pass. `pit_pending_reject_001` frontmatter and body status changed to `processed`.
 - Reject target behavior: pass. `02_SOPs/SOP - PBS Pending Reject.md` was not created.
+
+### 2026-05-23 beta.2 polish smoke
+
+Environment:
+
+- macOS app bundle: `target/release/bundle/macos/Pit2SOP.app`
+- Isolated home: `/tmp/pit2sop-beta2-smoke.BOQKuK/home`
+- Vault: `/tmp/pit2sop-beta2-smoke.BOQKuK/vault`
+- Provider: heuristic, because this smoke only exercises seeded desktop UI actions.
+
+Seed:
+
+- `pit_pending_smoke_apply` with one `needs_review` pending patch targeting `02_SOPs/SOP - PBS Pending Smoke.md`.
+- `pit_pending_smoke_reject` with one `needs_review` pending patch targeting `02_SOPs/SOP - PBS Rejected Smoke.md`.
+
+Result:
+
+- Version display: pass. Sidebar and Settings showed `0.2.0-beta.2`; dirty builds append `-dirty`, and a post-commit rebuild showed a clean short SHA.
+- Pending detail preview: pass. The Pending panel showed target, source Pit, checklist items, and raw patch disclosure.
+- Markdown open/reveal actions: pass. Pending and Doing results exposed Open and Reveal actions; the Doing Reveal action completed without a desktop command error.
+- Apply path: pass. Clicking Apply moved the patch to `99_System/Pending Patches/Applied/`, created `02_SOPs/SOP - PBS Pending Smoke.md`, and refreshed the Pending list from 2 items to 1 item.
+- Reject path: pass. Clicking Reject moved the patch to `99_System/Pending Patches/Rejected/` and refreshed the Pending list from 1 item to empty.
+- Source Pit closure: pass. Both seeded Pit files changed from `needs_review` to `processed`.
+- Doing after apply: pass. `我要安装 PBS` matched `SOP - PBS Pending Smoke` and showed both seeded checklist items.
+- Diagnostics: pass. Copy Diagnostics produced app version, commit, platform, vault state, AI provider, secret configured status, counts, and last error fields without exposing any API key.

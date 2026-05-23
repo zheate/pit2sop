@@ -180,6 +180,7 @@ Settings -> choose/save Vault -> save/test AI key -> record Pit -> apply/reject 
 
 Use `pit2sop_docs/desktop-smoke-checklist.md` before tagging a desktop alpha or beta.
 Use `pit2sop_docs/release-artifacts.md` for the current macOS artifact commands.
+Use `pit2sop_docs/macos-signing-notarization.md` before attempting a signed macOS release.
 
 ## Status
 
