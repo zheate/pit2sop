@@ -157,6 +157,10 @@ pub struct AppStatus {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DesktopSettings {
     pub vault_path: Option<String>,
+    pub config_saved: bool,
+    pub vault_exists: bool,
+    pub vault_initialized: bool,
+    pub vault_writable: bool,
     pub language: String,
     pub ai_provider: String,
     pub ai_model: String,
@@ -191,6 +195,21 @@ pub struct AiHealthCheck {
     pub model: String,
     pub ok: bool,
     pub message: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DesktopError {
+    pub kind: String,
+    pub message: String,
+}
+
+impl DesktopError {
+    pub fn new(kind: impl Into<String>, message: impl Into<String>) -> Self {
+        Self {
+            kind: kind.into(),
+            message: message.into(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

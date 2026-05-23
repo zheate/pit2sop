@@ -1,5 +1,5 @@
 use crate::ai::{build_ai_provider, validate_ai_pit_response};
-use crate::config::{AiConfig, AppConfig, Secrets};
+use crate::config::{AiConfig, AppConfig, Secrets, config_path};
 use crate::db::{Database, PitRecord, SopRecord};
 use crate::markdown::{
     PitMarkdownInput, SopMarkdownInput, SopWriteOutcome, apply_pending_sop_patch,
@@ -16,7 +16,9 @@ use crate::models::{
 };
 use anyhow::{Context, Result, anyhow};
 use chrono::Utc;
+use reqwest::Url;
 use sha2::{Digest, Sha256};
+use std::fs;
 use std::path::{Path, PathBuf};
 
 pub struct Pit2Sop {
@@ -49,8 +51,13 @@ impl Pit2Sop {
     }
 
     pub fn settings(&self) -> DesktopSettings {
+        let vault_path = &self.config.vault_path;
         DesktopSettings {
-            vault_path: Some(self.config.vault_path.to_string_lossy().to_string()),
+            vault_path: Some(vault_path.to_string_lossy().to_string()),
+            config_saved: config_path().exists(),
+            vault_exists: vault_path.exists(),
+            vault_initialized: vault_initialized(vault_path),
+            vault_writable: vault_path.is_dir() && ensure_writable_dir(vault_path).is_ok(),
             language: self.config.language.clone(),
             ai_provider: self.config.ai.provider.clone(),
             ai_model: self.config.ai.model.clone(),
@@ -61,13 +68,10 @@ impl Pit2Sop {
     }
 
     pub fn save_settings(input: SaveSettingsInput) -> Result<AppStatus> {
+        validate_settings_input(&input)?;
         let vault_path = non_empty(&input.vault_path, "vault path")?;
         let provider = normalize_provider(&input.ai_provider)?;
-        let language = if input.language.trim().is_empty() {
-            "zh-CN".to_string()
-        } else {
-            input.language.trim().to_string()
-        };
+        let language = input.language.trim().to_string();
         let model = if input.ai_model.trim().is_empty() {
             default_model_for_provider(&provider).to_string()
         } else {
@@ -156,6 +160,10 @@ impl Pit2Sop {
                 message: error.to_string(),
             },
         }
+    }
+
+    pub fn validate_settings_input(input: &SaveSettingsInput) -> Result<()> {
+        validate_settings_input(input)
     }
 
     pub fn process_pit(&self, raw_text: &str) -> Result<ProcessingSummary> {
@@ -588,6 +596,74 @@ fn relative(root: &Path, path: &Path) -> String {
         .to_string()
 }
 
+pub fn validate_settings_input(input: &SaveSettingsInput) -> Result<()> {
+    let vault_path = PathBuf::from(non_empty(&input.vault_path, "Vault path")?);
+    if !vault_path.exists() {
+        return Err(anyhow!("Vault path does not exist"));
+    }
+    if !vault_path.is_dir() {
+        return Err(anyhow!("Vault path must be a directory"));
+    }
+    fs::read_dir(&vault_path).context("Vault path is not readable")?;
+    ensure_writable_dir(&vault_path)?;
+
+    let language = non_empty(&input.language, "Language")?;
+    if !matches!(language, "zh-CN" | "en-US") {
+        return Err(anyhow!("Unsupported language: {}", language));
+    }
+
+    let provider = normalize_provider(&input.ai_provider)?;
+    match provider.as_str() {
+        "deepseek" => {
+            non_empty(&input.ai_model, "DeepSeek model")?;
+            let base_url = non_empty(input.ai_base_url.as_deref().unwrap_or(""), "AI base URL")?;
+            validate_http_url(base_url)?;
+        }
+        "heuristic" => {
+            if let Some(base_url) = input
+                .ai_base_url
+                .as_deref()
+                .map(str::trim)
+                .filter(|value| !value.is_empty() && *value != "local")
+            {
+                validate_http_url(base_url)?;
+            }
+        }
+        _ => unreachable!("normalize_provider only returns supported providers"),
+    }
+
+    Ok(())
+}
+
+fn validate_http_url(value: &str) -> Result<()> {
+    let url = Url::parse(value).map_err(|_| anyhow!("AI base URL must be a valid URL"))?;
+    if !matches!(url.scheme(), "http" | "https") {
+        return Err(anyhow!("AI base URL must use http or https"));
+    }
+    Ok(())
+}
+
+fn vault_initialized(vault_path: &Path) -> bool {
+    [
+        "00_Inbox/Unprocessed",
+        "01_Pits",
+        "02_SOPs",
+        "99_System/Pending Patches",
+    ]
+    .iter()
+    .all(|relative| vault_path.join(relative).is_dir())
+}
+
+fn ensure_writable_dir(path: &Path) -> Result<()> {
+    let test_path = path.join(format!(
+        ".pit2sop-write-test-{}",
+        Utc::now().timestamp_nanos_opt().unwrap_or_default()
+    ));
+    fs::write(&test_path, b"ok").context("Vault path is not writable")?;
+    fs::remove_file(&test_path).context("failed to clean up Vault write test")?;
+    Ok(())
+}
+
 fn non_empty<'a>(value: &'a str, name: &str) -> Result<&'a str> {
     let value = value.trim();
     if value.is_empty() {
@@ -754,6 +830,74 @@ mod tests {
         assert!(health.ok, "{}", health.message);
         assert_eq!(health.provider, "heuristic");
         assert_eq!(health.model, "heuristic");
+    }
+
+    #[test]
+    fn settings_validation_accepts_existing_writable_vault() {
+        let temp = tempdir().unwrap();
+        let input = SaveSettingsInput {
+            vault_path: temp.path().to_string_lossy().to_string(),
+            language: "zh-CN".into(),
+            ai_provider: "deepseek".into(),
+            ai_model: "deepseek-v4-pro".into(),
+            ai_base_url: Some("https://api.deepseek.com".into()),
+        };
+
+        validate_settings_input(&input).unwrap();
+    }
+
+    #[test]
+    fn settings_validation_rejects_bad_vault_and_language() {
+        let temp = tempdir().unwrap();
+        let mut input = SaveSettingsInput {
+            vault_path: temp.path().join("missing").to_string_lossy().to_string(),
+            language: "zh-CN".into(),
+            ai_provider: "deepseek".into(),
+            ai_model: "deepseek-v4-pro".into(),
+            ai_base_url: Some("https://api.deepseek.com".into()),
+        };
+        assert!(
+            validate_settings_input(&input)
+                .unwrap_err()
+                .to_string()
+                .contains("does not exist")
+        );
+
+        input.vault_path = temp.path().to_string_lossy().to_string();
+        input.language = "fr-FR".into();
+        assert!(
+            validate_settings_input(&input)
+                .unwrap_err()
+                .to_string()
+                .contains("Unsupported language")
+        );
+    }
+
+    #[test]
+    fn settings_validation_requires_deepseek_model_and_url() {
+        let temp = tempdir().unwrap();
+        let mut input = SaveSettingsInput {
+            vault_path: temp.path().to_string_lossy().to_string(),
+            language: "zh-CN".into(),
+            ai_provider: "deepseek".into(),
+            ai_model: "".into(),
+            ai_base_url: Some("https://api.deepseek.com".into()),
+        };
+        assert!(
+            validate_settings_input(&input)
+                .unwrap_err()
+                .to_string()
+                .contains("DeepSeek model")
+        );
+
+        input.ai_model = "deepseek-v4-pro".into();
+        input.ai_base_url = Some("not-a-url".into());
+        assert!(
+            validate_settings_input(&input)
+                .unwrap_err()
+                .to_string()
+                .contains("valid URL")
+        );
     }
 
     #[test]
