@@ -5,6 +5,9 @@ import {
   AlertTriangle,
   CheckCircle2,
   CircleDashed,
+  Copy,
+  ExternalLink,
+  Eye,
   FileCheck2,
   FolderOpen,
   KeyRound,
@@ -55,6 +58,11 @@ type PendingPatch = {
   source_pit: string;
   status: string;
   title: string;
+};
+
+type PendingPatchDetail = PendingPatch & {
+  checklist_items: string[];
+  body: string;
 };
 
 type PatchActionSummary = {
@@ -109,6 +117,11 @@ type AiHealthCheck = {
   message: string;
 };
 
+type AppVersion = {
+  version: string;
+  git_sha: string;
+};
+
 type DesktopError = {
   kind: string;
   message: string;
@@ -151,11 +164,16 @@ function App() {
   const [query, setQuery] = useState("");
   const [results, setResults] = useState<SearchResult[]>([]);
   const [pending, setPending] = useState<PendingPatch[]>([]);
+  const [patchDetails, setPatchDetails] = useState<Record<string, PendingPatchDetail>>(
+    {},
+  );
   const [settings, setSettings] = useState<DesktopSettings | null>(null);
   const [settingsForm, setSettingsForm] =
     useState<SaveSettingsInput>(defaultSettingsForm);
   const [apiKey, setApiKey] = useState("");
   const [aiHealth, setAiHealth] = useState<AiHealthCheck | null>(null);
+  const [appVersion, setAppVersion] = useState<AppVersion | null>(null);
+  const [diagnosticsText, setDiagnosticsText] = useState("");
   const [busy, setBusy] = useState("");
   const [notice, setNotice] = useState("");
   const [error, setError] = useState<DesktopError | null>(null);
@@ -200,6 +218,11 @@ function App() {
     }
   }
 
+  async function refreshVersion() {
+    const next = await invoke<AppVersion>("app_version").catch(() => null);
+    if (next) setAppVersion(next);
+  }
+
   async function refreshSettings() {
     const next = await invoke<DesktopSettings>("get_settings").catch((cause) => {
       setStatusError(toDesktopError(cause).message);
@@ -220,7 +243,12 @@ function App() {
   async function refreshDesktopState(
     options: { refreshDoing?: boolean; refreshSearch?: boolean } = {},
   ) {
-    await Promise.all([refreshStatus(), refreshSettings(), refreshPending()]);
+    await Promise.all([
+      refreshVersion(),
+      refreshStatus(),
+      refreshSettings(),
+      refreshPending(),
+    ]);
     if (options.refreshDoing) await refreshDoingMatches();
     if (options.refreshSearch) await refreshSearchResults();
   }
@@ -268,6 +296,11 @@ function App() {
     );
     if (summary) {
       setNotice(summary.message);
+      setPatchDetails((current) => {
+        const next = { ...current };
+        delete next[path];
+        return next;
+      });
       await refreshDesktopState({
         refreshDoing: Boolean(doingText.trim()),
         refreshSearch: Boolean(query.trim()),
@@ -281,12 +314,44 @@ function App() {
     );
     if (summary) {
       setNotice(summary.message);
+      setPatchDetails((current) => {
+        const next = { ...current };
+        delete next[path];
+        return next;
+      });
       await refreshDesktopState({ refreshSearch: Boolean(query.trim()) });
+    }
+  }
+
+  async function loadPatchDetail(path: string) {
+    if (patchDetails[path]) {
+      setPatchDetails((current) => {
+        const next = { ...current };
+        delete next[path];
+        return next;
+      });
+      return;
+    }
+    const detail = await run("patchDetail", () =>
+      invoke<PendingPatchDetail>("pending_patch_detail", { path }),
+    );
+    if (detail) {
+      setPatchDetails((current) => ({ ...current, [path]: detail }));
     }
   }
 
   async function openVault() {
     await run("openVault", () => invoke<void>("open_vault"));
+  }
+
+  async function openMarkdown(path: string) {
+    await run("openMarkdown", () => invoke<void>("open_markdown_path", { path }));
+  }
+
+  async function revealMarkdown(path: string) {
+    await run("revealMarkdown", () =>
+      invoke<void>("reveal_markdown_path", { path }),
+    );
   }
 
   async function chooseVault() {
@@ -354,6 +419,23 @@ function App() {
     }
   }
 
+  async function copyDiagnostics() {
+    const text = await run("diagnostics", () =>
+      invoke<string>("diagnostics", {
+        lastErrorKind: error?.kind ?? null,
+        lastErrorMessage: error?.message ?? null,
+      }),
+    );
+    if (!text) return;
+    setDiagnosticsText(text);
+    try {
+      await navigator.clipboard.writeText(text);
+      setNotice("诊断信息已复制");
+    } catch {
+      setNotice("诊断信息已生成，可手动复制");
+    }
+  }
+
   async function loadDoingMatches() {
     return invoke<DoingMatch[]>("doing", { text: doingText });
   }
@@ -413,7 +495,11 @@ function App() {
           <div className="mark">P2</div>
           <div>
             <strong>Pit2SOP</strong>
-            <span>V0.2 Desktop</span>
+            <span>
+              {appVersion
+                ? `v${appVersion.version} · ${appVersion.git_sha}`
+                : "V0.2 Desktop"}
+            </span>
           </div>
         </div>
 
@@ -498,6 +584,13 @@ function App() {
                 </button>
               </div>
               {pitSummary && <SummaryBlock summary={pitSummary} />}
+              {pitSummary && (
+                <SummaryActions
+                  onOpen={openMarkdown}
+                  onReveal={revealMarkdown}
+                  summary={pitSummary}
+                />
+              )}
             </section>
           )}
 
@@ -528,6 +621,10 @@ function App() {
                       <span className={`risk ${match.risk}`}>{match.risk}</span>
                     </div>
                     <small>{match.path}</small>
+                    <PathActions
+                      onOpen={() => void openMarkdown(match.path)}
+                      onReveal={() => void revealMarkdown(match.path)}
+                    />
                     <ul>
                       {match.checklist_items.map((item) => (
                         <li key={item}>{item}</li>
@@ -570,6 +667,10 @@ function App() {
                       <span>{item.doc_type}</span>
                     </div>
                     <small>{item.path}</small>
+                    <PathActions
+                      onOpen={() => void openMarkdown(item.path)}
+                      onReveal={() => void revealMarkdown(item.path)}
+                    />
                     <p>{item.snippet}</p>
                   </article>
                 ))}
@@ -598,8 +699,24 @@ function App() {
                       <small>{patch.path}</small>
                       <p>target: {patch.target}</p>
                       <p>source: {patch.source_pit}</p>
+                      <PathActions
+                        onOpen={() => void openMarkdown(patch.path)}
+                        onReveal={() => void revealMarkdown(patch.path)}
+                      />
+                      {patchDetails[patch.path] && (
+                        <PatchDetail detail={patchDetails[patch.path]} />
+                      )}
                     </div>
                     <div className="patch-actions">
+                      <button
+                        className="icon-button"
+                        disabled={busy === "patchDetail"}
+                        onClick={() => void loadPatchDetail(patch.path)}
+                        type="button"
+                      >
+                        <Eye size={18} />
+                        预览
+                      </button>
                       <button
                         className="primary-button"
                         disabled={busy === "apply"}
@@ -759,6 +876,8 @@ function App() {
               </div>
 
               <div className="settings-grid">
+                <Metric label="Version" value={appVersion?.version ?? "-"} />
+                <Metric label="Commit" value={appVersion?.git_sha ?? "-"} />
                 <Metric label="Vault" value={status?.vault_path ?? "-"} />
                 <Metric label="DB" value={status?.db_path ?? "-"} />
                 <Metric
@@ -772,6 +891,23 @@ function App() {
                 <Metric label="Indexed docs" value={String(status?.indexed_docs ?? 0)} />
                 <Metric label="Pits" value={String(status?.pit_files ?? 0)} />
                 <Metric label="SOPs" value={String(status?.sop_files ?? 0)} />
+              </div>
+              <div className="settings-section">
+                <div className="section-toolbar">
+                  <strong>Diagnostics</strong>
+                  <button
+                    className="icon-button"
+                    disabled={busy === "diagnostics"}
+                    onClick={() => void copyDiagnostics()}
+                    type="button"
+                  >
+                    <Copy size={17} />
+                    Copy Diagnostics
+                  </button>
+                </div>
+                {diagnosticsText && (
+                  <pre className="diagnostics-box">{diagnosticsText}</pre>
+                )}
               </div>
             </section>
           )}
@@ -792,6 +928,81 @@ function SummaryBlock({ summary }: { summary: ProcessingSummary }) {
       {summary.sop_path && <p>SOP: {summary.sop_path}</p>}
       {summary.pending_patch_path && <p>Pending: {summary.pending_patch_path}</p>}
       {summary.review_path && <p>Review: {summary.review_path}</p>}
+    </div>
+  );
+}
+
+function SummaryActions({
+  summary,
+  onOpen,
+  onReveal,
+}: {
+  summary: ProcessingSummary;
+  onOpen: (path: string) => void;
+  onReveal: (path: string) => void;
+}) {
+  const paths = [
+    ["Pit", summary.pit_path],
+    ["SOP", summary.sop_path],
+    ["Pending", summary.pending_patch_path],
+    ["Review", summary.review_path],
+  ].filter((entry): entry is [string, string] => Boolean(entry[1]));
+  if (paths.length === 0) return null;
+  return (
+    <div className="path-list">
+      {paths.map(([label, path]) => (
+        <div className="path-line" key={`${label}:${path}`}>
+          <strong>{label}</strong>
+          <span>{path}</span>
+          <PathActions
+            onOpen={() => onOpen(path)}
+            onReveal={() => onReveal(path)}
+          />
+        </div>
+      ))}
+    </div>
+  );
+}
+
+function PathActions({
+  onOpen,
+  onReveal,
+}: {
+  onOpen: () => void;
+  onReveal: () => void;
+}) {
+  return (
+    <div className="inline-actions">
+      <button className="icon-button" onClick={onOpen} type="button">
+        <ExternalLink size={15} />
+        打开
+      </button>
+      <button className="icon-button" onClick={onReveal} type="button">
+        <FolderOpen size={15} />
+        定位
+      </button>
+    </div>
+  );
+}
+
+function PatchDetail({ detail }: { detail: PendingPatchDetail }) {
+  return (
+    <div className="patch-detail">
+      <div className="detail-grid">
+        <span>target</span>
+        <strong>{detail.target}</strong>
+        <span>source</span>
+        <strong>{detail.source_pit}</strong>
+      </div>
+      <ul>
+        {detail.checklist_items.map((item) => (
+          <li key={item}>{item}</li>
+        ))}
+      </ul>
+      <details>
+        <summary>Raw patch</summary>
+        <pre className="patch-body">{detail.body}</pre>
+      </details>
     </div>
   );
 }

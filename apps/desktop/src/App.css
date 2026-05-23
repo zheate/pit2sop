@@ -288,6 +288,37 @@ button:disabled {
   padding: 16px;
 }
 
+.path-list {
+  display: grid;
+  gap: 10px;
+}
+
+.path-line {
+  align-items: center;
+  background: #ffffff;
+  border: 1px solid #dde5e0;
+  border-radius: 8px;
+  display: grid;
+  gap: 10px;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  padding: 12px 14px;
+}
+
+.path-line span {
+  color: #4f5f57;
+  overflow-wrap: anywhere;
+}
+
+.inline-actions {
+  display: flex;
+  gap: 8px;
+  margin-top: 10px;
+}
+
+.path-line .inline-actions {
+  margin-top: 0;
+}
+
 .summary p,
 .result p {
   color: #4f5f57;
@@ -442,9 +473,54 @@ button:disabled {
 
 .patch-actions {
   align-items: stretch;
+  flex-direction: column;
+}
+
+.patch-detail {
+  background: #f8faf9;
+  border: 1px solid #dde5e0;
+  border-radius: 8px;
+  display: grid;
+  gap: 10px;
+  margin-top: 12px;
+  padding: 12px;
+}
+
+.detail-grid {
+  display: grid;
+  gap: 4px 10px;
+  grid-template-columns: auto minmax(0, 1fr);
+}
+
+.detail-grid span {
+  color: #6b7a73;
+  font-size: 12px;
+  font-weight: 800;
+  text-transform: uppercase;
+}
+
+.detail-grid strong {
+  overflow-wrap: anywhere;
+}
+
+.patch-body,
+.diagnostics-box {
+  background: #17201d;
+  border-radius: 8px;
+  color: #eef6f0;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 12px;
+  line-height: 1.5;
+  margin: 8px 0 0;
+  max-height: 260px;
+  overflow: auto;
+  padding: 12px;
+  white-space: pre-wrap;
 }
 
 .settings-grid {
+  display: grid;
+  gap: 12px;
   grid-template-columns: repeat(2, minmax(0, 1fr));
 }
 
