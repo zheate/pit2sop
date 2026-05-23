@@ -1,6 +1,20 @@
 # Pit2SOP
 
-Pit2SOP turns daily mistakes into executable personal SOP checklists, then reminds you before similar work.
+Pit2SOP turns repeated mistakes into pre-action checklists.
+
+中文定义：Pit2SOP 把踩过的坑变成下次行动前的检查清单。
+
+Core loop:
+
+```text
+Capture a pit
+→ extract the prevention rule
+→ update an SOP
+→ before similar work, surface the checklist
+→ reduce repeated mistakes
+```
+
+Pit2SOP is not a general note app, task manager, knowledge base, or chat assistant. Its value is whether it reminds you before repeating a real mistake.
 
 Current V0.1 is intentionally small:
 

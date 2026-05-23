@@ -1,7 +1,9 @@
 # Pit2SOP 说明文档
 
 > 工作名：**Pit2SOP**  
-> 定位：**把日常踩坑记录转成个人 SOP，并在你再次进入相似工作场景前提醒你。**
+> 定位：**把踩过的坑变成下次行动前的检查清单。**
+
+产品北极星见：[product-north-star.md](product-north-star.md)。
 
 ---
 
