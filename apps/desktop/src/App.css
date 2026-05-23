@@ -264,6 +264,12 @@ button:disabled {
 .error {
   background: #f7e9e9;
   color: #992525;
+  display: grid;
+  gap: 4px;
+}
+
+.error span {
+  overflow-wrap: anywhere;
 }
 
 .summary,
@@ -308,6 +314,71 @@ button:disabled {
 .results {
   display: grid;
   gap: 12px;
+}
+
+.setup-card {
+  background: #ffffff;
+  border: 1px solid #dde5e0;
+  border-radius: 8px;
+  box-shadow: 0 12px 28px rgba(37, 48, 43, 0.05);
+  display: grid;
+  gap: 14px;
+  margin-bottom: 18px;
+  padding: 16px;
+}
+
+.setup-grid {
+  display: grid;
+  gap: 10px;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.setup-item {
+  border: 1px solid #dde5e0;
+  border-radius: 8px;
+  display: grid;
+  gap: 10px;
+  min-width: 0;
+  padding: 12px;
+}
+
+.setup-item > div {
+  align-items: center;
+  display: flex;
+  gap: 8px;
+}
+
+.setup-item p {
+  color: #53615b;
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+
+.setup-item.ok {
+  background: #f3faf5;
+  border-color: #cdebd4;
+}
+
+.setup-item.ok svg {
+  color: #237a55;
+}
+
+.setup-item.warn {
+  background: #fbf7ea;
+  border-color: #eadca8;
+}
+
+.setup-item.warn svg {
+  color: #8a6f18;
+}
+
+.setup-item.missing {
+  background: #fbefef;
+  border-color: #efcdcd;
+}
+
+.setup-item.missing svg {
+  color: #9b2323;
 }
 
 .result-head {
@@ -509,6 +580,7 @@ button:disabled {
 
   .pending-item,
   .settings-grid,
+  .setup-grid,
   .form-grid {
     grid-template-columns: 1fr;
   }

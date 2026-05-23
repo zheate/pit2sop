@@ -2,7 +2,9 @@ import { useEffect, useMemo, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import {
+  AlertTriangle,
   CheckCircle2,
+  CircleDashed,
   FileCheck2,
   FolderOpen,
   KeyRound,
@@ -76,6 +78,10 @@ type AppStatus = {
 
 type DesktopSettings = {
   vault_path?: string | null;
+  config_saved: boolean;
+  vault_exists: boolean;
+  vault_initialized: boolean;
+  vault_writable: boolean;
   language: string;
   ai_provider: string;
   ai_model: string;
@@ -103,7 +109,20 @@ type AiHealthCheck = {
   message: string;
 };
 
+type DesktopError = {
+  kind: string;
+  message: string;
+};
+
 type TabKey = "pit" | "doing" | "search" | "pending" | "settings";
+type SetupAction = "settings" | "chooseVault" | "saveSettings" | "testAi";
+
+type SetupItem = {
+  label: string;
+  status: "ok" | "warn" | "missing";
+  detail: string;
+  action?: SetupAction;
+};
 
 const tabs: Array<{ key: TabKey; label: string; icon: typeof ShieldAlert }> = [
   { key: "pit", label: "记录一个坑", icon: ShieldAlert },
@@ -139,27 +158,31 @@ function App() {
   const [aiHealth, setAiHealth] = useState<AiHealthCheck | null>(null);
   const [busy, setBusy] = useState("");
   const [notice, setNotice] = useState("");
-  const [error, setError] = useState("");
+  const [error, setError] = useState<DesktopError | null>(null);
 
   const selectedTab = useMemo(
     () => tabs.find((tab) => tab.key === activeTab) ?? tabs[0],
     [activeTab],
   );
+  const setupItems = useMemo(
+    () => buildSetupItems(settings, status, aiHealth),
+    [aiHealth, settings, status],
+  );
+  const hasSetupIssues = setupItems.some((item) => item.status !== "ok");
+  const settingsFormReady = isSettingsFormReady(settingsForm);
 
   useEffect(() => {
-    void refreshStatus();
-    void refreshSettings();
-    void refreshPending();
+    void refreshDesktopState();
   }, []);
 
   async function run<T>(label: string, task: () => Promise<T>) {
     setBusy(label);
-    setError("");
+    setError(null);
     setNotice("");
     try {
       return await task();
     } catch (cause) {
-      setError(cause instanceof Error ? cause.message : String(cause));
+      setError(toDesktopError(cause));
       return null;
     } finally {
       setBusy("");
@@ -168,7 +191,7 @@ function App() {
 
   async function refreshStatus() {
     const next = await invoke<AppStatus>("app_status").catch((cause) => {
-      setStatusError(cause instanceof Error ? cause.message : String(cause));
+      setStatusError(toDesktopError(cause).message);
       return null;
     });
     if (next) {
@@ -179,7 +202,7 @@ function App() {
 
   async function refreshSettings() {
     const next = await invoke<DesktopSettings>("get_settings").catch((cause) => {
-      setStatusError(cause instanceof Error ? cause.message : String(cause));
+      setStatusError(toDesktopError(cause).message);
       return null;
     });
     if (next) applySettings(next);
@@ -191,9 +214,15 @@ function App() {
   }
 
   async function refreshAll() {
-    await refreshStatus();
-    await refreshSettings();
-    await refreshPending();
+    await refreshDesktopState({ refreshDoing: true, refreshSearch: true });
+  }
+
+  async function refreshDesktopState(
+    options: { refreshDoing?: boolean; refreshSearch?: boolean } = {},
+  ) {
+    await Promise.all([refreshStatus(), refreshSettings(), refreshPending()]);
+    if (options.refreshDoing) await refreshDoingMatches();
+    if (options.refreshSearch) await refreshSearchResults();
   }
 
   function applySettings(next: DesktopSettings) {
@@ -217,24 +246,19 @@ function App() {
       setPitSummary(summary);
       setNotice(summary.message);
       setPitText("");
-      await refreshPending();
-      await refreshStatus();
+      await refreshDesktopState({ refreshSearch: Boolean(query.trim()) });
     }
   }
 
   async function submitDoing() {
     if (!doingText.trim()) return;
-    const next = await run("doing", () =>
-      invoke<DoingMatch[]>("doing", { text: doingText }),
-    );
+    const next = await run("doing", () => loadDoingMatches());
     if (next) setMatches(next);
   }
 
   async function submitSearch() {
     if (!query.trim()) return;
-    const next = await run("search", () =>
-      invoke<SearchResult[]>("search", { query }),
-    );
+    const next = await run("search", () => loadSearchResults());
     if (next) setResults(next);
   }
 
@@ -244,8 +268,10 @@ function App() {
     );
     if (summary) {
       setNotice(summary.message);
-      await refreshPending();
-      await refreshStatus();
+      await refreshDesktopState({
+        refreshDoing: Boolean(doingText.trim()),
+        refreshSearch: Boolean(query.trim()),
+      });
     }
   }
 
@@ -255,8 +281,7 @@ function App() {
     );
     if (summary) {
       setNotice(summary.message);
-      await refreshPending();
-      await refreshStatus();
+      await refreshDesktopState({ refreshSearch: Boolean(query.trim()) });
     }
   }
 
@@ -282,8 +307,11 @@ function App() {
     if (next) {
       setStatus(next);
       setNotice("设置已保存");
-      await refreshSettings();
-      await refreshPending();
+      setAiHealth(null);
+      setMatches([]);
+      setResults([]);
+      setPitSummary(null);
+      await refreshDesktopState();
     }
   }
 
@@ -300,8 +328,8 @@ function App() {
     if (summary) {
       setApiKey("");
       setNotice(`${summary.provider} secret 已保存`);
-      await refreshSettings();
-      await refreshStatus();
+      setAiHealth(null);
+      await refreshDesktopState();
     }
   }
 
@@ -311,8 +339,8 @@ function App() {
     );
     if (summary) {
       setNotice(`${summary.provider} secret 已清除`);
-      await refreshSettings();
-      await refreshStatus();
+      setAiHealth(null);
+      await refreshDesktopState();
     }
   }
 
@@ -324,6 +352,32 @@ function App() {
       setAiHealth(health);
       setNotice(health.message);
     }
+  }
+
+  async function loadDoingMatches() {
+    return invoke<DoingMatch[]>("doing", { text: doingText });
+  }
+
+  async function loadSearchResults() {
+    return invoke<SearchResult[]>("search", { query });
+  }
+
+  async function refreshDoingMatches() {
+    if (!doingText.trim()) return;
+    const next = await loadDoingMatches().catch((cause) => {
+      setError(toDesktopError(cause));
+      return null;
+    });
+    if (next) setMatches(next);
+  }
+
+  async function refreshSearchResults() {
+    if (!query.trim()) return;
+    const next = await loadSearchResults().catch((cause) => {
+      setError(toDesktopError(cause));
+      return null;
+    });
+    if (next) setResults(next);
   }
 
   function updateSettingsField<K extends keyof SaveSettingsInput>(
@@ -410,10 +464,20 @@ function App() {
         </header>
 
         {notice && <div className="notice">{notice}</div>}
-        {error && <div className="error">{error}</div>}
+        {error && <ErrorBanner error={error} />}
         {statusError && <div className="error">{statusError}</div>}
 
         <div className="content">
+          {(activeTab === "settings" || hasSetupIssues) && (
+            <SetupStatus
+              items={setupItems}
+              onChooseVault={() => void chooseVault()}
+              onOpenSettings={() => setActiveTab("settings")}
+              onSaveSettings={() => void saveSettings()}
+              onTestAi={() => void testAiProvider()}
+            />
+          )}
+
           {activeTab === "pit" && (
             <section className="panel">
               <textarea
@@ -569,7 +633,7 @@ function App() {
                   <strong>Vault</strong>
                   <button
                     className="icon-button"
-                    disabled={busy === "saveSettings"}
+                    disabled={busy === "saveSettings" || !settingsFormReady}
                     onClick={() => void saveSettings()}
                     type="button"
                   >
@@ -732,6 +796,69 @@ function SummaryBlock({ summary }: { summary: ProcessingSummary }) {
   );
 }
 
+function SetupStatus({
+  items,
+  onChooseVault,
+  onOpenSettings,
+  onSaveSettings,
+  onTestAi,
+}: {
+  items: SetupItem[];
+  onChooseVault: () => void;
+  onOpenSettings: () => void;
+  onSaveSettings: () => void;
+  onTestAi: () => void;
+}) {
+  return (
+    <section className="setup-card">
+      <div className="section-toolbar">
+        <strong>Setup status</strong>
+        <button className="icon-button" onClick={onOpenSettings} type="button">
+          <Settings size={17} />
+          设置
+        </button>
+      </div>
+      <div className="setup-grid">
+        {items.map((item) => {
+          const Icon = item.status === "ok" ? CheckCircle2 : item.status === "warn" ? AlertTriangle : CircleDashed;
+          return (
+            <article className={`setup-item ${item.status}`} key={item.label}>
+              <div>
+                <Icon size={18} />
+                <strong>{item.label}</strong>
+              </div>
+              <p>{item.detail}</p>
+              {item.action && (
+                <button
+                  className={item.status === "missing" ? "primary-button" : "icon-button"}
+                  onClick={() => {
+                    if (item.action === "chooseVault") onChooseVault();
+                    if (item.action === "saveSettings") onSaveSettings();
+                    if (item.action === "testAi") onTestAi();
+                    if (item.action === "settings") onOpenSettings();
+                  }}
+                  type="button"
+                >
+                  {actionLabel(item.action)}
+                </button>
+              )}
+            </article>
+          );
+        })}
+      </div>
+    </section>
+  );
+}
+
+function ErrorBanner({ error }: { error: DesktopError }) {
+  return (
+    <div className={`error ${error.kind}`}>
+      <strong>{errorTitle(error.kind)}</strong>
+      <span>{error.message}</span>
+    </div>
+  );
+}
+
 function EmptyState({ text }: { text: string }) {
   return <div className="empty">{text}</div>;
 }
@@ -749,6 +876,124 @@ function compactPath(path: string) {
   const parts = path.split("/");
   if (parts.length <= 3) return path;
   return `${parts[parts.length - 3]}/${parts[parts.length - 2]}/${parts[parts.length - 1]}`;
+}
+
+function buildSetupItems(
+  settings: DesktopSettings | null,
+  status: AppStatus | null,
+  aiHealth: AiHealthCheck | null,
+): SetupItem[] {
+  const provider = settings?.ai_provider ?? status?.ai_provider ?? "deepseek";
+  const hasKey = Boolean(settings?.has_deepseek_api_key ?? status?.secrets_configured);
+  const items: SetupItem[] = [
+    {
+      label: "Vault configured",
+      status: settings?.config_saved ? "ok" : "missing",
+      detail: settings?.config_saved
+        ? settings.vault_path || "-"
+        : "还没有保存桌面端配置。",
+      action: settings?.config_saved ? undefined : "settings",
+    },
+    {
+      label: "Vault directory",
+      status: settings?.vault_exists && settings?.vault_writable ? "ok" : "missing",
+      detail:
+        settings?.vault_exists && settings?.vault_writable
+          ? "目录存在且可写。"
+          : "选择一个已存在且可读写的目录。",
+      action:
+        settings?.vault_exists && settings?.vault_writable ? undefined : "chooseVault",
+    },
+    {
+      label: "Vault initialized",
+      status: settings?.vault_initialized ? "ok" : "warn",
+      detail: settings?.vault_initialized
+        ? "Pit2SOP 目录结构已就绪。"
+        : "保存 Settings 会初始化 Vault 目录结构。",
+      action: settings?.vault_initialized ? undefined : "saveSettings",
+    },
+    {
+      label: "AI secret",
+      status: provider === "heuristic" || hasKey ? "ok" : "missing",
+      detail:
+        provider === "heuristic"
+          ? "当前使用本地 heuristic provider。"
+          : hasKey
+            ? "DeepSeek API key 已配置。"
+            : "DeepSeek provider 需要保存 API key。",
+      action: provider === "deepseek" && !hasKey ? "settings" : undefined,
+    },
+    {
+      label: "AI provider",
+      status: aiHealth ? (aiHealth.ok ? "ok" : "warn") : "warn",
+      detail: aiHealth
+        ? aiHealth.message
+        : "点击测试确认当前 provider 是否可用。",
+      action: "testAi",
+    },
+  ];
+  return items;
+}
+
+function isSettingsFormReady(input: SaveSettingsInput) {
+  if (!input.vault_path.trim()) return false;
+  if (!["zh-CN", "en-US"].includes(input.language.trim())) return false;
+  if (!["deepseek", "heuristic"].includes(input.ai_provider.trim())) return false;
+  if (input.ai_provider === "deepseek") {
+    return Boolean(input.ai_model.trim() && input.ai_base_url?.trim());
+  }
+  return true;
+}
+
+function toDesktopError(cause: unknown): DesktopError {
+  if (isDesktopError(cause)) return cause;
+  if (cause instanceof Error) {
+    return { kind: "unknown", message: cause.message };
+  }
+  return { kind: "unknown", message: String(cause) };
+}
+
+function isDesktopError(cause: unknown): cause is DesktopError {
+  return (
+    typeof cause === "object" &&
+    cause !== null &&
+    "message" in cause &&
+    "kind" in cause &&
+    typeof (cause as DesktopError).message === "string" &&
+    typeof (cause as DesktopError).kind === "string"
+  );
+}
+
+function errorTitle(kind: string) {
+  switch (kind) {
+    case "validation":
+      return "校验错误";
+    case "config":
+      return "配置错误";
+    case "secret":
+      return "Secret 错误";
+    case "ai":
+      return "AI 错误";
+    case "filesystem":
+      return "文件错误";
+    case "database":
+      return "数据库错误";
+    default:
+      return "错误";
+  }
+}
+
+function actionLabel(action: SetupAction) {
+  switch (action) {
+    case "chooseVault":
+      return "选择 Vault";
+    case "saveSettings":
+      return "保存设置";
+    case "testAi":
+      return "测试 AI";
+    case "settings":
+      return "打开设置";
+  }
 }
 
 function subtitle(tab: TabKey) {
