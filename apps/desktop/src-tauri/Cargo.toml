@@ -1,6 +1,6 @@
 [package]
 name = "pit2sop-desktop"
-version = "0.1.0"
+version = "0.2.0-beta.1"
 description = "Pit2SOP desktop shell"
 authors = ["Pit2SOP"]
 edition = "2024"
