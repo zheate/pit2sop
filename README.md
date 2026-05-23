@@ -178,6 +178,8 @@ V0.2 desktop smoke path:
 Settings -> choose/save Vault -> save/test AI key -> record Pit -> apply/reject Pending -> doing -> search -> restart app
 ```
 
+Use `pit2sop_docs/desktop-smoke-checklist.md` before tagging a desktop alpha or beta.
+
 ## Status
 
 V0.1 is the local CLI/core review loop. V0.2 alpha is the Tauri desktop shell and settings loop. It has no phone app, background agent, or system notification yet.
