@@ -88,3 +88,27 @@ Notes:
 
 - The API key was not typed into the UI during this run; an existing local `secrets.toml` was copied into the isolated smoke home to avoid exposing the secret in automation logs.
 - The local heuristic provider was also checked for mechanical write flow. It created a generic `SOP - 未分类检查.md`; semantic `PBS` matching should be judged with DeepSeek, not heuristic.
+
+### 2026-05-23 beta.1 pending UI smoke
+
+Environment:
+
+- macOS app bundle: `target/release/bundle/macos/Pit2SOP.app`
+- Isolated home: `/tmp/pit2sop-pending-smoke.q7RIsd/home`
+- Vault: `/tmp/pit2sop-pending-smoke.q7RIsd/vault`
+- Provider: heuristic, because this smoke only exercises seeded pending patch UI commands.
+
+Seed:
+
+- `pit_pending_apply_001` with one `needs_review` pending patch targeting `02_SOPs/SOP - PBS Pending Apply.md`.
+- `pit_pending_reject_001` with one `needs_review` pending patch targeting `02_SOPs/SOP - PBS Pending Reject.md`.
+
+Result:
+
+- Pending list: pass. The desktop Pending panel showed both seeded patches.
+- Apply path: pass. Clicking Apply moved the patch to `99_System/Pending Patches/Applied/`, created `02_SOPs/SOP - PBS Pending Apply.md`, and refreshed the Pending list from 2 items to 1 item.
+- Apply source Pit closure: pass. `pit_pending_apply_001` frontmatter and body status changed to `processed`.
+- Doing after apply: pass. `我要安装 PBS 并确认备份目录` matched `SOP - PBS Pending Apply` and showed both seeded checklist items.
+- Reject path: pass. Clicking Reject moved the patch to `99_System/Pending Patches/Rejected/` and refreshed the Pending list from 1 item to empty.
+- Reject source Pit closure: pass. `pit_pending_reject_001` frontmatter and body status changed to `processed`.
+- Reject target behavior: pass. `02_SOPs/SOP - PBS Pending Reject.md` was not created.
